@@ -54,7 +54,7 @@ import { WorkManifestSchema, type WorkManifest } from "../harness/contracts.js";
 import { syncWorkSourceArtifacts, captureWorkSourceState, changedWorkSourcePaths } from "../harness/source-sync.js";
 import { reviewChapterDraft } from "./chapter-review.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
-import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
+import { isPersistedPlanReusable, loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
 import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { loadAvailableAgentSkills, mergeActivatedSkillGuidance } from "../skills/index.js";
@@ -2170,7 +2170,13 @@ export class PipelineRunner {
       (!externalContext || externalContext.trim().length === 0)
     ) {
       const persisted = await loadPersistedPlan(bookDir, chapterNumber);
-      if (persisted) return persisted;
+      if (persisted) {
+        const authorMindEnabled = Boolean((book as any).authorMind);
+        const { reusable } = isPersistedPlanReusable(persisted, {
+          expectedAuthorMindEnabled: authorMindEnabled,
+        });
+        if (reusable) return persisted;
+      }
     }
 
     const planner = new PlannerAgent(this.agentCtxFor("planner", book.id));

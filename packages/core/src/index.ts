@@ -187,10 +187,13 @@ export {
   PersistedPlanV3Schema,
   PlanningProfileSchema,
   computePlannerConfigHash,
+  computePlanningInputHash,
+  isPersistedPlanReusable,
   savePersistedPlan,
   loadPersistedPlan,
   type PersistedPlan,
   type PlanningProfile,
+  type PlanReusabilityCheckOptions,
 } from "./pipeline/persisted-governed-plan.js";
 
 export {

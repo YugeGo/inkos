@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import type { PlanChapterOutput } from "../agents/planner.js";
+import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import { createHash } from "node:crypto";
 import {
   ChapterCreativeContractSchema,
@@ -35,6 +36,33 @@ export function computePlannerConfigHash(params: {
 }
 
 /**
+ * Computes deterministic fingerprint hash for planning evidence input bundle
+ * to detect state changes that invalidate cached plans.
+ */
+export function computePlanningInputHash(evidenceBundle: PlanningEvidenceBundle): string {
+  const lines: string[] = [];
+  const categories = [
+    "bookRules",
+    "canonFacts",
+    "runtimeState",
+    "activeHooks",
+    "outlineIntentions",
+    "authorInstructions",
+  ] as const;
+
+  for (const cat of categories) {
+    const items = evidenceBundle[cat] ?? [];
+    for (const item of items) {
+      lines.push(`${cat}|${item.ref}|${item.authority}|${item.text}`);
+    }
+  }
+  for (const charId of evidenceBundle.characterIds ?? []) {
+    lines.push(`characterId|${charId}`);
+  }
+  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
+}
+
+/**
  * Planning profile tracking feature flags, model identifiers, and contract schema version
  * for plan cache fingerprinting.
  */
@@ -46,6 +74,7 @@ export const PlanningProfileSchema = z.object({
   plannerProvider: z.string().min(1).optional(),
   plannerModel: z.string().min(1).optional(),
   plannerConfigHash: z.string().min(1).optional(),
+  planningInputHash: z.string().min(1).optional(),
 }).strict();
 export type PlanningProfile = z.infer<typeof PlanningProfileSchema>;
 
@@ -93,6 +122,7 @@ export async function savePersistedPlan(
     readonly plannerToolVersion?: number;
     readonly plannerProvider?: string;
     readonly plannerModel?: string;
+    readonly planningInputHash?: string;
     readonly downgradePlan?: boolean;
   },
 ): Promise<void> {
@@ -114,6 +144,7 @@ export async function savePersistedPlan(
     const toolVersion = originalProfile?.plannerToolVersion ?? options?.plannerToolVersion;
     const provider = originalProfile?.plannerProvider ?? options?.plannerProvider;
     const model = originalProfile?.plannerModel ?? options?.plannerModel;
+    const inputHash = originalProfile?.planningInputHash ?? options?.planningInputHash;
     const configHash = originalProfile?.plannerConfigHash ?? computePlannerConfigHash({
       provider,
       model,
@@ -135,6 +166,7 @@ export async function savePersistedPlan(
         ...(toolVersion ? { plannerToolVersion: toolVersion } : {}),
         ...(provider ? { plannerProvider: provider } : {}),
         ...(model ? { plannerModel: model } : {}),
+        ...(inputHash ? { planningInputHash: inputHash } : {}),
         plannerConfigHash: configHash,
       },
       plannerInputs: plan.plannerInputs,
@@ -148,6 +180,68 @@ export async function savePersistedPlan(
     });
   }
   await writeFile(planPath(bookDir, plan.memo.chapter), `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+}
+
+export interface PlanReusabilityCheckOptions {
+  readonly expectedAuthorMindEnabled: boolean;
+  readonly expectedConfigHash?: string;
+  readonly expectedInputHash?: string;
+}
+
+/**
+ * Validates whether a persisted plan matches current planning configuration and input state.
+ * Returns reusable: false if config/input hashes mismatch or if Author-Mind requirement is unsatisfied.
+ */
+export function isPersistedPlanReusable(
+  plan: PlanChapterOutput,
+  options: PlanReusabilityCheckOptions,
+): { readonly reusable: boolean; readonly reason?: string } {
+  if (options.expectedAuthorMindEnabled) {
+    if (!plan.creativeContract) {
+      return {
+        reusable: false,
+        reason: "Author-Mind is enabled but the persisted plan lacks a Creative Contract.",
+      };
+    }
+  }
+
+  const profile = plan.planningProfile;
+  if (!profile) {
+    if (options.expectedAuthorMindEnabled) {
+      return {
+        reusable: false,
+        reason: "Author-Mind is enabled but the persisted plan has no planning profile.",
+      };
+    }
+    return { reusable: true };
+  }
+
+  if (profile.authorMindEnabled !== options.expectedAuthorMindEnabled) {
+    return {
+      reusable: false,
+      reason: `Author-Mind state mismatch: expected ${options.expectedAuthorMindEnabled}, found ${profile.authorMindEnabled}.`,
+    };
+  }
+
+  if (options.expectedConfigHash && profile.plannerConfigHash) {
+    if (profile.plannerConfigHash !== options.expectedConfigHash) {
+      return {
+        reusable: false,
+        reason: `Planner configuration hash mismatch: expected ${options.expectedConfigHash}, found ${profile.plannerConfigHash}.`,
+      };
+    }
+  }
+
+  if (options.expectedInputHash && profile.planningInputHash) {
+    if (profile.planningInputHash !== options.expectedInputHash) {
+      return {
+        reusable: false,
+        reason: `Planning evidence input hash mismatch: expected ${options.expectedInputHash}, found ${profile.planningInputHash}.`,
+      };
+    }
+  }
+
+  return { reusable: true };
 }
 
 

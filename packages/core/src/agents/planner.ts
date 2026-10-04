@@ -31,6 +31,7 @@ import { buildPlanningEvidenceBundle } from "./planner-evidence.js";
 import { normalizePlannerContract } from "./planner-contract-normalizer.js";
 import {
   computePlannerConfigHash,
+  computePlanningInputHash,
   type PlanningProfile,
 } from "../pipeline/persisted-governed-plan.js";
 
@@ -113,7 +114,7 @@ export class PlannerAgent extends BaseAgent {
       input.book.language,
     );
 
-    const authorMindEnabled = input.authorMindEnabled ?? (input.book as any).authorMind ?? true;
+    const authorMindEnabled = input.authorMindEnabled ?? (input.book as any).authorMind ?? false;
     const language = input.book.language ?? "zh";
     const padded = String(input.chapterNumber).padStart(4, "0");
 
@@ -142,6 +143,7 @@ export class PlannerAgent extends BaseAgent {
 
       const provider = (this.ctx.client as any).provider ?? "unknown";
       const model = this.ctx.model;
+      const inputHash = computePlanningInputHash(evidenceBundle);
       const configHash = computePlannerConfigHash({
         provider,
         model,
@@ -159,6 +161,7 @@ export class PlannerAgent extends BaseAgent {
         plannerProvider: provider,
         plannerModel: model,
         plannerConfigHash: configHash,
+        planningInputHash: inputHash,
       };
 
       // Persist Markdown projection for creative contract
@@ -259,8 +262,12 @@ export class PlannerAgent extends BaseAgent {
           throw new Error(`Planner contract structural normalization failed after repair (Fail-Closed): ${structuralError.message}`);
         }
         messages.push({
+          role: "assistant",
+          content: JSON.stringify(result, null, 2),
+        });
+        messages.push({
           role: "user",
-          content: buildContractRepairUserMessage(lastErrors, language),
+          content: buildContractRepairUserMessage(lastErrors, result, language),
         });
         continue;
       }
@@ -294,8 +301,12 @@ export class PlannerAgent extends BaseAgent {
 
       // Append targeted diagnostic repair instructions and retry
       messages.push({
+        role: "assistant",
+        content: JSON.stringify(result, null, 2),
+      });
+      messages.push({
         role: "user",
-        content: buildContractRepairUserMessage(validation.errors, language),
+        content: buildContractRepairUserMessage(validation.errors, result, language),
       });
     }
 

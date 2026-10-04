@@ -2,7 +2,8 @@ import { Type, type Static } from "@sinclair/typebox";
 
 /**
  * TypeBox Schema for LLM-facing Creative Contract Draft.
- * LLM is responsible for creative decisions, NOT database metadata or auto-increment IDs.
+ * LLM uses 'semanticKey' for narrative co-reference across reveal/withhold/boundaries,
+ * while the Host normalizer maps them to canonical machine IDs.
  */
 
 export const DraftBeliefStrength = Type.Union([
@@ -36,8 +37,15 @@ export const DraftPlotProgress = Type.Union([
   Type.Literal("high"),
 ]);
 
+/**
+ * Information target draft using semanticKey for reliable cross-field co-reference.
+ */
 export const DraftInformationTargetSchema = Type.Object({
-  id: Type.Optional(Type.String({ maxLength: 64, description: "Stable identifier (e.g. fact_valve_oil), optional for model" })),
+  semanticKey: Type.String({
+    minLength: 1,
+    maxLength: 64,
+    description: "Semantic co-reference key (e.g. 'arthur_father_project_role') to identify identical information across reveal/withhold/mustRemainUnknown",
+  }),
   description: Type.String({ minLength: 1, maxLength: 300, description: "Clear proposition description" }),
 });
 
@@ -61,15 +69,15 @@ export const DraftReaderStateSchema = Type.Object({
 });
 
 export const DraftHardConstraintSchema = Type.Object({
-  id: Type.Optional(Type.String({ maxLength: 64 })),
+  semanticKey: Type.Optional(Type.String({ maxLength: 64, description: "Optional key for this constraint" })),
   statement: Type.String({ minLength: 1, maxLength: 500 }),
   source: DraftConstraintSource,
-  sourceRef: Type.Optional(Type.String({ maxLength: 256 })),
+  sourceRef: Type.Optional(Type.String({ maxLength: 256, description: "Evidence reference from Planning Evidence (e.g. canon:fact#1, state:fact#2, rule:prohibition#1)" })),
   priority: Type.Optional(DraftConstraintPriority),
 });
 
 export const DraftCharacterConstraintSchema = Type.Object({
-  characterId: Type.String({ minLength: 1, maxLength: 64 }),
+  characterId: Type.String({ minLength: 1, maxLength: 64, description: "Character name/id matching registered roles" }),
   mustNotKnow: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 10 })),
   beliefsThatMustPersist: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 10 })),
   beliefsAtStart: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 10 })),
@@ -77,7 +85,7 @@ export const DraftCharacterConstraintSchema = Type.Object({
 });
 
 export const DraftInformationBoundarySchema = Type.Object({
-  id: Type.Optional(Type.String({ maxLength: 64 })),
+  semanticKey: Type.Optional(Type.String({ maxLength: 64, description: "Semantic key matching information targets that must remain hidden from the reader" })),
   topic: Type.String({ minLength: 1, maxLength: 200 }),
   boundaryRule: Type.String({ minLength: 1, maxLength: 400 }),
 });
@@ -90,7 +98,7 @@ export const DraftForbiddenShortcutSchema = Type.Object({
 
 export const PlannerCreativeContractDraftSchema = Type.Object({
   whyThisChapterExists: Type.Object({
-    statement: Type.String({ minLength: 1, maxLength: 600, description: "Why this chapter is indispensable to the book" }),
+    statement: Type.String({ minLength: 1, maxLength: 600, description: "Why this chapter is indispensable to the whole book" }),
   }),
   chapterFunction: Type.Optional(Type.Object({
     primary: Type.String({ minLength: 1, maxLength: 100 }),

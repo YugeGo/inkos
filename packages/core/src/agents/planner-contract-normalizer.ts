@@ -5,9 +5,19 @@ import {
 import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import type { PlannerCreativeContractDraft } from "./planner-draft-schema.js";
 
+function sanitizeId(key: string): string {
+  return key
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 50);
+}
+
 /**
  * Normalizes an LLM-submitted Creative Contract Draft into a canonical ChapterCreativeContract.
- * Injects schemaVersion, generates missing stable IDs, and normalizes character identifiers.
+ * Maps draft semanticKey into stable machine IDs, normalizes character identifiers against
+ * registered roles, and injects schemaVersion.
  */
 export function normalizePlannerContract(
   draft: PlannerCreativeContractDraft,
@@ -27,7 +37,8 @@ export function normalizePlannerContract(
 
   // 1. Normalize Hard Constraints
   const hardConstraints = draft.hardConstraints.map((hc, idx) => {
-    const id = hc.id?.trim() || `hc_${String(idx + 1).padStart(2, "0")}`;
+    const rawKey = hc.semanticKey || (hc as any).id;
+    const id = rawKey ? `hc_${sanitizeId(rawKey)}` : `hc_${String(idx + 1).padStart(2, "0")}`;
     return {
       id,
       statement: hc.statement.trim(),
@@ -48,7 +59,9 @@ export function normalizePlannerContract(
 
   // 3. Normalize Reader Transition & Information Boundaries
   const mustRemainUnknown = draft.readerTransition.mustRemainUnknown.map((ib, idx) => {
-    const id = ib.id?.trim() || `ib_${String(idx + 1).padStart(2, "0")}`;
+    const rawKey = ib.semanticKey || (ib as any).id;
+    // If semanticKey is provided, align prefix with information target prefix for deterministic intersection detection
+    const id = rawKey ? `info_${sanitizeId(rawKey)}` : `ib_${String(idx + 1).padStart(2, "0")}`;
     return {
       id,
       topic: ib.topic.trim(),
@@ -79,7 +92,8 @@ export function normalizePlannerContract(
 
   // 4. Normalize Information Targets in Planned Author Intent
   const reveal = draft.plannedAuthorIntent.informationStrategy.reveal.map((target, idx) => {
-    const id = target.id?.trim() || `info_rev_${String(idx + 1).padStart(2, "0")}`;
+    const rawKey = target.semanticKey || (target as any).id;
+    const id = rawKey ? `info_${sanitizeId(rawKey)}` : `info_rev_${String(idx + 1).padStart(2, "0")}`;
     return {
       id,
       description: target.description.trim(),
@@ -87,7 +101,8 @@ export function normalizePlannerContract(
   });
 
   const withhold = draft.plannedAuthorIntent.informationStrategy.withhold.map((target, idx) => {
-    const id = target.id?.trim() || `info_wth_${String(idx + 1).padStart(2, "0")}`;
+    const rawKey = target.semanticKey || (target as any).id;
+    const id = rawKey ? `info_${sanitizeId(rawKey)}` : `info_wth_${String(idx + 1).padStart(2, "0")}`;
     return {
       id,
       description: target.description.trim(),

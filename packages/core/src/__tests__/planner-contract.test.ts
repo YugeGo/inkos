@@ -6,6 +6,10 @@ import {
   PlannerAgent,
   normalizePlannerContract,
   buildPlanningEvidenceBundle,
+  validateCreativeContractSemantics,
+  isPersistedPlanReusable,
+  computePlannerConfigHash,
+  computePlanningInputHash,
   type PlannerCreativeContractDraft,
   type PlanningEvidenceBundle,
 } from "../index.js";
@@ -118,8 +122,8 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     plannedAuthorIntent: {
       readerEffects: ["让读者随着 Arthur 的视线在黑暗中逐步发现细节疑点"],
       informationStrategy: {
-        reveal: [{ description: "通风管道内侧有防潮防腐刻痕" }],
-        withhold: [{ description: "当年矿长办公室抽屉里的保险单" }],
+        reveal: [{ semanticKey: "pipe_markings", description: "通风管道内侧有防潮防腐刻痕" }],
+        withhold: [{ semanticKey: "insurance_policy", description: "当年矿长办公室抽屉里的保险单" }],
       },
       attentionStrategy: ["聚焦在环境的细微反常细节上，避免宏观宣讲"],
       emotionalTrajectory: ["戒备谨慎 -> 发现疑点 -> 脊背发凉的怀疑"],
@@ -149,8 +153,8 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     expect(canonical.hardConstraints[0].id).toBe("hc_01");
     expect(canonical.hardConstraints[1].id).toBe("hc_02");
     expect(canonical.readerTransition.mustRemainUnknown[0].id).toBe("ib_01");
-    expect(canonical.plannedAuthorIntent.informationStrategy.reveal[0].id).toBe("info_rev_01");
-    expect(canonical.plannedAuthorIntent.informationStrategy.withhold[0].id).toBe("info_wth_01");
+    expect(canonical.plannedAuthorIntent.informationStrategy.reveal[0].id).toBe("info_pipe_markings");
+    expect(canonical.plannedAuthorIntent.informationStrategy.withhold[0].id).toBe("info_insurance_policy");
     expect(canonical.forbiddenShortcuts[0].code).toBe("fs_01");
 
     // Check priority default
@@ -158,32 +162,47 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
   });
 
   it("builds a bounded PlanningEvidenceBundle from story directory files", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
     const storyDir = join(tempDir, "story");
     const stateDir = join(storyDir, "state");
     const outlineDir = join(storyDir, "outline");
-    await mkdir(stateDir, { recursive: true });
+    const majorRolesDir = join(storyDir, "roles", "主要角色");
+    const minorRolesDir = join(storyDir, "roles", "次要角色");
     await mkdir(outlineDir, { recursive: true });
+    await mkdir(majorRolesDir, { recursive: true });
+    await mkdir(minorRolesDir, { recursive: true });
 
     await writeFile(
-      join(storyDir, "book_rules.md"),
-      "- 核心规则1: 魔法不可无中生有\n- 核心规则2: 铅封破坏需手动认证",
+      join(storyDir, "book_rules.json"),
+      JSON.stringify({
+        protagonist: { name: "Arthur", behavioralConstraints: ["魔法不可无中生有"] },
+        prohibitions: ["铅封破坏需手动认证"],
+      }),
       "utf-8",
     );
     await writeFile(
       join(stateDir, "current_state.json"),
-      JSON.stringify({ "console.power": "offline", "door.locked": true }),
+      JSON.stringify({
+        chapter: 1,
+        facts: [
+          { id: "fact_1", subject: "Arthur", predicate: "location", object: "Old Mine", sourceChapter: 1 },
+          { id: "fact_2", subject: "console", predicate: "power", object: "offline", sourceChapter: 1 },
+        ],
+      }),
       "utf-8",
     );
     await writeFile(
-      join(stateDir, "characters.json"),
-      JSON.stringify(["Arthur", { id: "clara" }]),
+      join(stateDir, "hooks.json"),
+      JSON.stringify({
+        version: 1,
+        hooks: [
+          { id: "hk_01", title: "失踪的领班", description: "在旧矿井失踪的领班线索", status: "active" },
+        ],
+      }),
       "utf-8",
     );
-    await writeFile(
-      join(stateDir, "threads.json"),
-      JSON.stringify([{ id: "hk_01", title: "失踪的领班" }]),
-      "utf-8",
-    );
+    await writeFile(join(majorRolesDir, "Arthur.md"), "# Arthur\n主要角色", "utf-8");
+    await writeFile(join(minorRolesDir, "clara.md"), "# Clara\n次要角色", "utf-8");
     await writeFile(
       join(outlineDir, "story_frame.md"),
       "- 第10章大纲设想: 城堡攻坚战（大纲规划，非既定事实）",
@@ -389,5 +408,227 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     expect(contractMd).toContain("# Chapter 1 Creative Contract (Projection)");
     expect(contractMd).toContain("Arthur 必须亲自下潜至井底");
     expect(contractMd).toContain("## 3. Hard Constraints");
+  });
+
+  it("normalizes semanticKey into machine IDs and validates reveal vs withhold/mustRemainUnknown collisions", () => {
+    // 1. Reveal vs Withhold semanticKey collision
+    const collisionDraft: PlannerCreativeContractDraft = {
+      ...sampleDraft,
+      plannedAuthorIntent: {
+        ...sampleDraft.plannedAuthorIntent,
+        informationStrategy: {
+          reveal: [{ semanticKey: "father_project_role", description: "父亲参与了旧矿井工程" }],
+          withhold: [{ semanticKey: "father_project_role", description: "父亲在工程中的具体职责" }],
+        },
+      },
+    };
+
+    // 1. Reveal vs Withhold semanticKey collision: ChapterCreativeContractSchema fails closed
+    expect(() => normalizePlannerContract(collisionDraft, sampleBundle)).toThrow(
+      /cannot be in both reveal and withhold strategies/,
+    );
+
+    // 2. Reveal vs Boundary (mustRemainUnknown) semanticKey collision
+    const boundaryCollisionDraft: PlannerCreativeContractDraft = {
+      ...sampleDraft,
+      readerTransition: {
+        ...sampleDraft.readerTransition,
+        mustRemainUnknown: [
+          {
+            semanticKey: "mastermind_identity",
+            topic: "幕后黑手真实身份",
+            boundaryRule: "本章不得透露幕后黑手身份",
+          },
+        ],
+      },
+      plannedAuthorIntent: {
+        ...sampleDraft.plannedAuthorIntent,
+        informationStrategy: {
+          reveal: [{ semanticKey: "mastermind_identity", description: "公布幕后黑手就是上一任领班" }],
+          withhold: [],
+        },
+      },
+    };
+
+    // 2. Reveal vs Boundary (mustRemainUnknown) semanticKey collision: ChapterCreativeContractSchema fails closed
+    expect(() => normalizePlannerContract(boundaryCollisionDraft, sampleBundle)).toThrow(
+      /is marked for reveal but also listed in mustRemainUnknown/,
+    );
+  });
+
+  it("isPersistedPlanReusable rejects mismatched configHash, inputHash, or missing contract", () => {
+    const canonicalContract = normalizePlannerContract(sampleDraft, sampleBundle);
+    const validPlan = {
+      intent: { chapter: 1, goal: "调查矿井" },
+      memo: { chapter: 1, goal: "调查矿井", body: "正文规划", threadRefs: [] },
+      intentMarkdown: "# Intent",
+      plannerInputs: [],
+      runtimePath: "/path/to/intent.md",
+      creativeContract: canonicalContract,
+      planningProfile: {
+        authorMindEnabled: true,
+        plannerConfigHash: "config_abc123",
+        planningInputHash: "input_xyz789",
+      },
+    };
+
+    // 1. Valid exact match
+    const check1 = isPersistedPlanReusable(validPlan, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "config_abc123",
+      expectedInputHash: "input_xyz789",
+    });
+    expect(check1.reusable).toBe(true);
+
+    // 2. Config hash mismatch
+    const check2 = isPersistedPlanReusable(validPlan, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "config_different",
+      expectedInputHash: "input_xyz789",
+    });
+    expect(check2.reusable).toBe(false);
+    expect(check2.reason).toContain("Planner configuration hash mismatch");
+
+    // 3. Input hash mismatch (evidence bundle changed)
+    const check3 = isPersistedPlanReusable(validPlan, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "config_abc123",
+      expectedInputHash: "input_changed",
+    });
+    expect(check3.reusable).toBe(false);
+    expect(check3.reason).toContain("Planning evidence input hash mismatch");
+
+    // 4. Missing creativeContract when authorMind is required
+    const planWithoutContract = {
+      ...validPlan,
+      creativeContract: undefined,
+    };
+    const check4 = isPersistedPlanReusable(planWithoutContract, {
+      expectedAuthorMindEnabled: true,
+    });
+    expect(check4.reusable).toBe(false);
+    expect(check4.reason).toContain("lacks a Creative Contract");
+
+    // 5. Legacy plan reuse when authorMind is disabled
+    const legacyPlan = {
+      ...validPlan,
+      creativeContract: undefined,
+      planningProfile: undefined,
+    };
+    const check5 = isPersistedPlanReusable(legacyPlan, {
+      expectedAuthorMindEnabled: false,
+    });
+    expect(check5.reusable).toBe(true);
+  });
+
+  it("defaults authorMindEnabled to false and executes plain chapter memo planning", async () => {
+    let memoPlanCalled = false;
+    let contractPlanCalled = false;
+
+    const mockAgent = new (class extends PlannerAgent {
+      override async planChapterMemo(): Promise<any> {
+        memoPlanCalled = true;
+        return {
+          chapter: 1,
+          goal: "默认旧版规划目标",
+          body: "旧版正文大纲...",
+          threadRefs: [],
+        };
+      }
+
+      override async planGovernedContract(): Promise<any> {
+        contractPlanCalled = true;
+        throw new Error("Should not be called when authorMind is disabled");
+      }
+    })({
+      client: { defaults: { maxTokens: 4096 } } as any,
+      model: "test-model",
+      projectRoot: tempDir,
+    } as AgentContext);
+
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+
+    const output = await mockAgent.planChapter({
+      book: { chapterWordCount: 3000, language: "zh" } as any, // No authorMind flag set
+      bookDir: tempDir,
+      chapterNumber: 1,
+    });
+
+    expect(memoPlanCalled).toBe(true);
+    expect(contractPlanCalled).toBe(false);
+    expect(output.creativeContract).toBeUndefined();
+    expect(output.planningProfile).toBeUndefined();
+    expect(output.memo.goal).toBe("默认旧版规划目标");
+  });
+
+  it("repair loop embeds previous submission into messages for the second attempt", async () => {
+    let capturedMessagesOnAttempt2: any[] = [];
+    let callCount = 0;
+
+    const mockAgent = new (class extends PlannerAgent {
+      protected override async submitStructured(
+        messages: any,
+        _tool: any,
+        _options: any,
+      ): Promise<any> {
+        callCount++;
+        if (callCount === 1) {
+          // Attempt 1 fails semantic validation (reveal ∩ withhold collision)
+          return {
+            result: {
+              goal: "调查矿井",
+              body: "初次大纲",
+              threadRefs: [],
+              contractDraft: {
+                ...sampleDraft,
+                plannedAuthorIntent: {
+                  ...sampleDraft.plannedAuthorIntent,
+                  informationStrategy: {
+                    reveal: [{ semanticKey: "clash", description: "同一事实" }],
+                    withhold: [{ semanticKey: "clash", description: "同一事实" }],
+                  },
+                },
+              },
+            },
+            usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 },
+          };
+        }
+
+        // Attempt 2: capture messages history
+        capturedMessagesOnAttempt2 = [...messages];
+        return {
+          result: {
+            goal: "调查矿井",
+            body: "修正后大纲",
+            threadRefs: [],
+            contractDraft: sampleDraft,
+          },
+          usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 },
+        };
+      }
+    })({
+      client: { defaults: { maxTokens: 4096 } } as any,
+      model: "test-model",
+      projectRoot: tempDir,
+    } as AgentContext);
+
+    await mockAgent.planGovernedContract({
+      chapterNumber: 1,
+      contextPackage: { chapter: 1, selectedContext: [] },
+      evidenceBundle: sampleBundle,
+      lengthSpec: { target: 3000, countingMode: "zh_chars" } as any,
+    });
+
+    expect(callCount).toBe(2);
+    // Messages must contain: system, user, assistant (previous submission), user (repair diagnostics)
+    expect(capturedMessagesOnAttempt2.length).toBeGreaterThanOrEqual(4);
+    const assistantMsg = capturedMessagesOnAttempt2.find((m) => m.role === "assistant");
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg.content).toContain("初次大纲");
+
+    const repairUserMsg = capturedMessagesOnAttempt2[capturedMessagesOnAttempt2.length - 1];
+    expect(repairUserMsg.role).toBe("user");
+    expect(repairUserMsg.content).toContain("上一轮提交");
+    expect(repairUserMsg.content).toContain("初次大纲");
   });
 });
