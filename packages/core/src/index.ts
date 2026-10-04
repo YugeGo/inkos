@@ -217,8 +217,8 @@ export {
   type SkillResolutionResult,
 } from "./skills/index.js";
 export type { ActivatedSkillGuidance } from "./agent/skill-tool.js";
-export { PlannerAgent, type PlanChapterInput, type PlanChapterOutput } from "./agents/planner.js";
 export {
+
   ComposerAgent,
   composeGovernedChapter,
   type ComposeChapterInput,
@@ -248,7 +248,31 @@ export {
 export {
   buildPlannerUserMessage,
   getPlannerMemoSystemPrompt,
+  getAuthorMindPlannerSystemPrompt,
+  buildContractRepairUserMessage,
 } from "./agents/planner-prompts.js";
+export {
+  PlannerCreativeContractDraftSchema,
+  type PlannerCreativeContractDraft,
+} from "./agents/planner-draft-schema.js";
+export {
+  ChapterMemoToolSchema,
+  GovernedPlanContractToolSchema,
+} from "./agents/planner-tool.js";
+export {
+  normalizePlannerContract,
+} from "./agents/planner-contract-normalizer.js";
+export {
+  buildPlanningEvidenceBundle,
+} from "./agents/planner-evidence.js";
+export {
+  PLANNER_PROMPT_VERSION,
+  PLANNER_TOOL_VERSION,
+  PlannerAgent,
+  type PlanChapterInput,
+  type PlanChapterOutput,
+} from "./agents/planner.js";
+
 export {
   buildProxyFetchInit,
   fetchWithProxy,
