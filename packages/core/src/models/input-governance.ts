@@ -70,3 +70,5 @@ export const ChapterTraceSchema = z.object({
 }).strict();
 
 export type ChapterTrace = z.infer<typeof ChapterTraceSchema>;
+
+export * from "./creative-contract.js";

@@ -26,12 +26,17 @@ export interface PlanChapterInput {
   readonly externalContext?: string;
 }
 
+import type { ChapterCreativeContract } from "../models/input-governance.js";
+import type { PlanningProfile } from "../pipeline/persisted-governed-plan.js";
+
 export interface PlanChapterOutput {
   readonly intent: ChapterIntent;
   readonly memo: ChapterMemo;
   readonly intentMarkdown: string;
   readonly plannerInputs: ReadonlyArray<string>;
   readonly runtimePath: string;
+  readonly creativeContract?: ChapterCreativeContract;
+  readonly planningProfile?: PlanningProfile;
 }
 
 /**
