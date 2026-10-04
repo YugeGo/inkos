@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BaseAgent } from "./base.js";
-import type { BookConfig } from "../models/book.js";
+import { resolveAuthorMindEnabled, type BookConfig } from "../models/book.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
 import {
@@ -31,6 +31,7 @@ import { buildPlanningEvidenceBundle } from "./planner-evidence.js";
 import { normalizePlannerContract } from "./planner-contract-normalizer.js";
 import {
   computePlannerConfigHash,
+  computePlannerProtocolHash,
   computePlanningInputHash,
   type PlanningProfile,
 } from "../pipeline/persisted-governed-plan.js";
@@ -114,7 +115,7 @@ export class PlannerAgent extends BaseAgent {
       input.book.language,
     );
 
-    const authorMindEnabled = input.authorMindEnabled ?? (input.book as any).authorMind ?? false;
+    const authorMindEnabled = resolveAuthorMindEnabled(input.book, input.authorMindEnabled);
     const language = input.book.language ?? "zh";
     const padded = String(input.chapterNumber).padStart(4, "0");
 
@@ -143,7 +144,12 @@ export class PlannerAgent extends BaseAgent {
 
       const provider = (this.ctx.client as any).provider ?? "unknown";
       const model = this.ctx.model;
-      const inputHash = computePlanningInputHash(evidenceBundle);
+      const protocolHash = computePlannerProtocolHash({
+        systemPrompt: getAuthorMindPlannerSystemPrompt(language),
+        toolSchema: GovernedPlanContractToolSchema,
+        contractSchemaVersion: creativeContract.schemaVersion,
+        language,
+      });
       const configHash = computePlannerConfigHash({
         provider,
         model,
@@ -151,6 +157,20 @@ export class PlannerAgent extends BaseAgent {
         toolVersion: PLANNER_TOOL_VERSION,
         contractSchemaVersion: creativeContract.schemaVersion,
         authorMindEnabled: true,
+        protocolHash,
+      });
+      const inputHash = computePlanningInputHash({
+        chapterNumber: input.chapterNumber,
+        evidenceBundle,
+        currentInstruction: input.externalContext,
+        externalContext: input.externalContext,
+        taskGoal,
+        lengthBudget: {
+          target: lengthSpec.target,
+          unit: lengthSpec.countingMode === "en_words" ? "words" : "字",
+        },
+        previousEndingExcerpt: seedMaterials.previousEndingExcerpt,
+        selectedSources: plannerInputs,
       });
 
       planningProfile = {
@@ -162,6 +182,7 @@ export class PlannerAgent extends BaseAgent {
         plannerModel: model,
         plannerConfigHash: configHash,
         planningInputHash: inputHash,
+        plannerProtocolHash: protocolHash,
       };
 
       // Persist Markdown projection for creative contract
@@ -267,7 +288,7 @@ export class PlannerAgent extends BaseAgent {
         });
         messages.push({
           role: "user",
-          content: buildContractRepairUserMessage(lastErrors, result, language),
+          content: buildContractRepairUserMessage(lastErrors, language),
         });
         continue;
       }
@@ -306,7 +327,7 @@ export class PlannerAgent extends BaseAgent {
       });
       messages.push({
         role: "user",
-        content: buildContractRepairUserMessage(validation.errors, result, language),
+        content: buildContractRepairUserMessage(validation.errors, language),
       });
     }
 

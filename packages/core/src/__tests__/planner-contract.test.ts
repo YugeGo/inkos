@@ -9,7 +9,9 @@ import {
   validateCreativeContractSemantics,
   isPersistedPlanReusable,
   computePlannerConfigHash,
+  computePlannerProtocolHash,
   computePlanningInputHash,
+  resolveAuthorMindEnabled,
   type PlannerCreativeContractDraft,
   type PlanningEvidenceBundle,
 } from "../index.js";
@@ -114,6 +116,7 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
       },
       mustRemainUnknown: [
         {
+          semanticKey: "mastermind_motivation",
           topic: "幕后黑手的真实动机",
           boundaryRule: "本章内不得出现任何指涉幕后主使真实动机的对话或日志",
         },
@@ -152,7 +155,7 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     // Check generated IDs
     expect(canonical.hardConstraints[0].id).toBe("hc_01");
     expect(canonical.hardConstraints[1].id).toBe("hc_02");
-    expect(canonical.readerTransition.mustRemainUnknown[0].id).toBe("ib_01");
+    expect(canonical.readerTransition.mustRemainUnknown[0].id).toBe("info_mastermind_motivation");
     expect(canonical.plannedAuthorIntent.informationStrategy.reveal[0].id).toBe("info_pipe_markings");
     expect(canonical.plannedAuthorIntent.informationStrategy.withhold[0].id).toBe("info_insurance_policy");
     expect(canonical.forbiddenShortcuts[0].code).toBe("fs_01");
@@ -161,7 +164,7 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     expect(canonical.hardConstraints[1].priority).toBe("absolute");
   });
 
-  it("builds a bounded PlanningEvidenceBundle from story directory files", async () => {
+  it("builds a bounded PlanningEvidenceBundle from authentic story directory files with active vs expired fact filtering", async () => {
     await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
     const storyDir = join(tempDir, "story");
     const stateDir = join(storyDir, "state");
@@ -172,35 +175,90 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     await mkdir(majorRolesDir, { recursive: true });
     await mkdir(minorRolesDir, { recursive: true });
 
+    // 100% schema-compliant BookRules (version: "2")
     await writeFile(
       join(storyDir, "book_rules.json"),
       JSON.stringify({
-        protagonist: { name: "Arthur", behavioralConstraints: ["魔法不可无中生有"] },
+        version: "2",
+        protagonist: {
+          name: "Arthur",
+          personalityLock: ["冷静谨慎"],
+          behavioralConstraints: ["魔法不可无中生有"],
+        },
+        genreLock: { primary: "奇幻", forbidden: [] },
         prohibitions: ["铅封破坏需手动认证"],
+        enableFullCastTracking: true,
+        allowedDeviations: [],
       }),
       "utf-8",
     );
+
+    // Update manifest to chapter 1 so state consistency check passes
+    await writeFile(
+      join(stateDir, "manifest.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        language: "zh",
+        lastAppliedChapter: 1,
+        projectionVersion: 1,
+      }),
+      "utf-8",
+    );
+
+    // 100% schema-compliant CurrentStateState with active & expired facts
     await writeFile(
       join(stateDir, "current_state.json"),
       JSON.stringify({
         chapter: 1,
         facts: [
-          { id: "fact_1", subject: "Arthur", predicate: "location", object: "Old Mine", sourceChapter: 1 },
-          { id: "fact_2", subject: "console", predicate: "power", object: "offline", sourceChapter: 1 },
+          {
+            subject: "Arthur",
+            predicate: "location",
+            object: "Old Mine",
+            validFromChapter: 1,
+            validUntilChapter: null,
+            sourceChapter: 1,
+          },
+          {
+            subject: "console",
+            predicate: "power",
+            object: "offline",
+            validFromChapter: 1,
+            validUntilChapter: null,
+            sourceChapter: 1,
+          },
+          {
+            subject: "flashlight",
+            predicate: "battery",
+            object: "dead",
+            validFromChapter: 0,
+            validUntilChapter: 0, // Expired before chapter 1!
+            sourceChapter: 0,
+          },
         ],
       }),
       "utf-8",
     );
+
+    // 100% schema-compliant HooksState
     await writeFile(
       join(stateDir, "hooks.json"),
       JSON.stringify({
-        version: 1,
         hooks: [
-          { id: "hk_01", title: "失踪的领班", description: "在旧矿井失踪的领班线索", status: "active" },
+          {
+            hookId: "hk_01",
+            startChapter: 1,
+            type: "plot",
+            status: "open",
+            lastAdvancedChapter: 1,
+            expectedPayoff: "查明失踪原因",
+            notes: "在旧矿井失踪的领班线索",
+          },
         ],
       }),
       "utf-8",
     );
+
     await writeFile(join(majorRolesDir, "Arthur.md"), "# Arthur\n主要角色", "utf-8");
     await writeFile(join(minorRolesDir, "clara.md"), "# Clara\n次要角色", "utf-8");
     await writeFile(
@@ -215,15 +273,56 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
       currentInstruction: "用户当前指令: 展现紧迫感",
     });
 
-    expect(bundle.bookRules).toHaveLength(2);
+    expect(bundle.bookRules).toHaveLength(3);
     expect(bundle.bookRules[0].authority).toBe("book_rule");
+    // Only the 2 currently valid facts are placed into runtime_state
     expect(bundle.runtimeState).toHaveLength(2);
     expect(bundle.runtimeState[0].authority).toBe("runtime_state");
+    // The expired fact is captured under canon facts
+    expect(bundle.canonFacts.some((f) => f.ref.includes("flashlight.battery"))).toBe(true);
     expect(bundle.characterIds).toContain("arthur");
     expect(bundle.characterIds).toContain("clara");
     expect(bundle.activeHooks[0].ref).toBe("hook:hk_01");
     expect(bundle.outlineIntentions[0].authority).toBe("outline");
     expect(bundle.authorInstructions[0].authority).toBe("author_instruction");
+  });
+
+  it("fails closed when authoritative runtime state is corrupted or invalid", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const stateDir = join(tempDir, "story", "state");
+
+    // Write corrupted JSON into current_state.json
+    await writeFile(
+      join(stateDir, "current_state.json"),
+      JSON.stringify({ chapter: "not-a-number", facts: "invalid" }),
+      "utf-8",
+    );
+
+    await expect(
+      buildPlanningEvidenceBundle({
+        bookDir: tempDir,
+        chapterNumber: 1,
+      }),
+    ).rejects.toThrow(/Authoritative runtime state is invalid or corrupted \(Fail-Closed\)/);
+  });
+
+  it("fails closed when book_rules.json exists but is schema-invalid", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const storyDir = join(tempDir, "story");
+
+    // book_rules.json exists but missing version "2" and required fields
+    await writeFile(
+      join(storyDir, "book_rules.json"),
+      JSON.stringify({ invalidRuleKey: 123 }),
+      "utf-8",
+    );
+
+    await expect(
+      buildPlanningEvidenceBundle({
+        bookDir: tempDir,
+        chapterNumber: 1,
+      }),
+    ).rejects.toThrow(/Authoritative book_rules.json is invalid or corrupted \(Fail-Closed\)/);
   });
 
   it("executes two-attempt validation/repair state machine in planGovernedContract and fails closed on repeated failure", async () => {
@@ -496,7 +595,7 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
       expectedInputHash: "input_changed",
     });
     expect(check3.reusable).toBe(false);
-    expect(check3.reason).toContain("Planning evidence input hash mismatch");
+    expect(check3.reason).toContain("Planning input hash mismatch");
 
     // 4. Missing creativeContract when authorMind is required
     const planWithoutContract = {
@@ -628,7 +727,144 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
 
     const repairUserMsg = capturedMessagesOnAttempt2[capturedMessagesOnAttempt2.length - 1];
     expect(repairUserMsg.role).toBe("user");
-    expect(repairUserMsg.content).toContain("上一轮提交");
-    expect(repairUserMsg.content).toContain("初次大纲");
+    expect(repairUserMsg.content).toContain("未通过宿主的一致性校验");
+    expect(repairUserMsg.content).toContain("info_clash");
+    expect(repairUserMsg.content).toContain("reveal and withhold");
+    expect(repairUserMsg.content).not.toContain("初次大纲");
+  });
+
+  it("normalizer provides deterministic SHA-256 fallback for non-ASCII semanticKeys", () => {
+    const draftWithNonAscii = {
+      ...sampleDraft,
+      hardConstraints: [
+        {
+          semanticKey: "幕后黑手身份",
+          statement: "主角不得知晓幕后黑手的真实身份",
+          source: "canon" as const,
+        },
+      ],
+    };
+    const contract1 = normalizePlannerContract(draftWithNonAscii);
+    const contract2 = normalizePlannerContract(draftWithNonAscii);
+
+    expect(contract1.hardConstraints[0].id).toBe(contract2.hardConstraints[0].id);
+    expect(contract1.hardConstraints[0].id).toMatch(/^hc_[a-f0-9]{12}$/);
+
+    const draftWithDifferentNonAscii = {
+      ...sampleDraft,
+      hardConstraints: [
+        {
+          semanticKey: "矿井入口机关",
+          statement: "矿井入口机关必须保持封死",
+          source: "canon" as const,
+        },
+      ],
+    };
+    const contract3 = normalizePlannerContract(draftWithDifferentNonAscii);
+    expect(contract3.hardConstraints[0].id).not.toBe(contract1.hardConstraints[0].id);
+  });
+
+  it("isPersistedPlanReusable fails closed when expected hashes are specified but missing from profile", () => {
+    const basePlan: any = {
+      memo: { chapter: 1, goal: "test", body: "test", threadRefs: [] },
+      intent: { chapter: 1 },
+      creativeContract: { schemaVersion: 3 },
+      planningProfile: {
+        authorMindEnabled: true,
+      },
+    };
+
+    const resConfig = isPersistedPlanReusable(basePlan, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "abc1234567890def",
+    });
+    expect(resConfig.reusable).toBe(false);
+    expect(resConfig.reason).toContain("missing from persisted plan");
+
+    const resInput = isPersistedPlanReusable(basePlan, {
+      expectedAuthorMindEnabled: true,
+      expectedInputHash: "1234567890abcdef",
+    });
+    expect(resInput.reusable).toBe(false);
+    expect(resInput.reason).toContain("missing from persisted plan");
+
+    const planWithHashes: any = {
+      ...basePlan,
+      planningProfile: {
+        authorMindEnabled: true,
+        plannerConfigHash: "abc1234567890def",
+        planningInputHash: "1234567890abcdef",
+      },
+    };
+    const resMatch = isPersistedPlanReusable(planWithHashes, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "abc1234567890def",
+      expectedInputHash: "1234567890abcdef",
+    });
+    expect(resMatch.reusable).toBe(true);
+
+    const resMismatch = isPersistedPlanReusable(planWithHashes, {
+      expectedAuthorMindEnabled: true,
+      expectedConfigHash: "wrong_config_hash",
+      expectedInputHash: "1234567890abcdef",
+    });
+    expect(resMismatch.reusable).toBe(false);
+    expect(resMismatch.reason).toContain("mismatch");
+  });
+
+  it("computePlanningInputHash produces identical hash regardless of characterId order or evidence array ordering", () => {
+    const bundleA: PlanningEvidenceBundle = {
+      bookRules: [],
+      canonFacts: [
+        { ref: "canon:fact1", text: "事实1", authority: "canon" },
+        { ref: "canon:fact2", text: "事实2", authority: "canon" },
+      ],
+      runtimeState: [],
+      activeHooks: [],
+      outlineIntentions: [],
+      authorInstructions: [],
+      characterIds: ["arthur", "beaver", "clara"],
+    };
+
+    const bundleB: PlanningEvidenceBundle = {
+      bookRules: [],
+      canonFacts: [
+        { ref: "canon:fact2", text: "事实2", authority: "canon" },
+        { ref: "canon:fact1", text: "事实1", authority: "canon" },
+      ],
+      runtimeState: [],
+      activeHooks: [],
+      outlineIntentions: [],
+      authorInstructions: [],
+      characterIds: ["clara", "arthur", "beaver"],
+    };
+
+    const hashA = computePlanningInputHash(bundleA);
+    const hashB = computePlanningInputHash(bundleB);
+    expect(hashA).toBe(hashB);
+
+    const dataA = {
+      chapterNumber: 2,
+      evidenceBundle: bundleA,
+      selectedSources: ["source_b.md", "source_a.md"],
+    };
+    const dataB = {
+      chapterNumber: 2,
+      evidenceBundle: bundleB,
+      selectedSources: ["source_a.md", "source_b.md"],
+    };
+    expect(computePlanningInputHash(dataA)).toBe(computePlanningInputHash(dataB));
+  });
+
+  it("resolveAuthorMindEnabled respects features.authorMind and explicit override", () => {
+    expect(resolveAuthorMindEnabled(undefined)).toBe(false);
+    expect(resolveAuthorMindEnabled(null)).toBe(false);
+    expect(resolveAuthorMindEnabled({})).toBe(false);
+
+    expect(resolveAuthorMindEnabled({ features: { authorMind: true } })).toBe(true);
+    expect(resolveAuthorMindEnabled({ features: { authorMind: false } })).toBe(false);
+
+    expect(resolveAuthorMindEnabled({ features: { authorMind: false } }, true)).toBe(true);
+    expect(resolveAuthorMindEnabled({ features: { authorMind: true } }, false)).toBe(false);
   });
 });

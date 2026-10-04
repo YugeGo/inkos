@@ -13,6 +13,25 @@ import {
 } from "../models/input-governance.js";
 
 /**
+ * Computes deterministic protocol fingerprint from actual prompt, tool schema,
+ * and contract schema version to ensure any prompt/tool edit immediately invalidates cache.
+ */
+export function computePlannerProtocolHash(params: {
+  readonly systemPrompt: string;
+  readonly toolSchema: unknown;
+  readonly contractSchemaVersion: number;
+  readonly language: string;
+}): string {
+  const content = [
+    params.systemPrompt,
+    JSON.stringify(params.toolSchema),
+    String(params.contractSchemaVersion),
+    params.language,
+  ].join(":::");
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+/**
  * Computes deterministic fingerprint hash for planning configuration
  * to ensure cache invalidation when model/prompt/schema changes.
  */
@@ -23,6 +42,7 @@ export function computePlannerConfigHash(params: {
   readonly toolVersion?: number;
   readonly contractSchemaVersion?: number;
   readonly authorMindEnabled: boolean;
+  readonly protocolHash?: string;
 }): string {
   const payload = JSON.stringify({
     provider: params.provider ?? "",
@@ -31,16 +51,66 @@ export function computePlannerConfigHash(params: {
     toolVersion: params.toolVersion ?? 0,
     contractSchemaVersion: params.contractSchemaVersion ?? 0,
     authorMindEnabled: params.authorMindEnabled,
+    protocolHash: params.protocolHash ?? "",
   });
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 
+export interface PlanningInputFingerprintData {
+  readonly chapterNumber?: number;
+  readonly evidenceBundle: PlanningEvidenceBundle;
+  readonly currentInstruction?: string;
+  readonly externalContext?: string;
+  readonly taskGoal?: string;
+  readonly lengthBudget?: { target: number; unit: string };
+  readonly previousEndingExcerpt?: string;
+  readonly selectedSources?: ReadonlyArray<string>;
+}
+
 /**
- * Computes deterministic fingerprint hash for planning evidence input bundle
- * to detect state changes that invalidate cached plans.
+ * Computes deterministic fingerprint hash for planning inputs and evidence bundle
+ * using canonical sorting to detect changes that invalidate cached plans.
  */
-export function computePlanningInputHash(evidenceBundle: PlanningEvidenceBundle): string {
+export function computePlanningInputHash(
+  input: PlanningEvidenceBundle | PlanningInputFingerprintData,
+): string {
+  const isBundle = "canonFacts" in input;
+  const bundle: PlanningEvidenceBundle = isBundle
+    ? (input as PlanningEvidenceBundle)
+    : (input as PlanningInputFingerprintData).evidenceBundle;
+  const data: Partial<PlanningInputFingerprintData> = isBundle
+    ? {}
+    : (input as PlanningInputFingerprintData);
+
   const lines: string[] = [];
+
+  // 1. Task & Context metadata
+  if (data.chapterNumber !== undefined) {
+    lines.push(`meta|chapter|${data.chapterNumber}`);
+  }
+  if (data.currentInstruction) {
+    lines.push(`meta|instruction|${data.currentInstruction.trim()}`);
+  }
+  if (data.externalContext) {
+    lines.push(`meta|externalContext|${data.externalContext.trim()}`);
+  }
+  if (data.taskGoal) {
+    lines.push(`meta|taskGoal|${data.taskGoal.trim()}`);
+  }
+  if (data.lengthBudget) {
+    lines.push(`meta|lengthBudget|${data.lengthBudget.target}:${data.lengthBudget.unit}`);
+  }
+  if (data.previousEndingExcerpt) {
+    lines.push(`meta|prevEnding|${data.previousEndingExcerpt.trim()}`);
+  }
+  if (data.selectedSources) {
+    const sortedSources = [...data.selectedSources].sort();
+    for (const src of sortedSources) {
+      lines.push(`meta|source|${src}`);
+    }
+  }
+
+  // 2. Canonically sorted Evidence Bundle
   const categories = [
     "bookRules",
     "canonFacts",
@@ -51,14 +121,18 @@ export function computePlanningInputHash(evidenceBundle: PlanningEvidenceBundle)
   ] as const;
 
   for (const cat of categories) {
-    const items = evidenceBundle[cat] ?? [];
+    const items = [...(bundle[cat] ?? [])];
+    items.sort((a, b) => a.ref.localeCompare(b.ref));
     for (const item of items) {
       lines.push(`${cat}|${item.ref}|${item.authority}|${item.text}`);
     }
   }
-  for (const charId of evidenceBundle.characterIds ?? []) {
+
+  const sortedChars = [...(bundle.characterIds ?? [])].sort();
+  for (const charId of sortedChars) {
     lines.push(`characterId|${charId}`);
   }
+
   return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
 }
 
@@ -75,6 +149,7 @@ export const PlanningProfileSchema = z.object({
   plannerModel: z.string().min(1).optional(),
   plannerConfigHash: z.string().min(1).optional(),
   planningInputHash: z.string().min(1).optional(),
+  plannerProtocolHash: z.string().min(1).optional(),
 }).strict();
 export type PlanningProfile = z.infer<typeof PlanningProfileSchema>;
 
@@ -123,6 +198,7 @@ export async function savePersistedPlan(
     readonly plannerProvider?: string;
     readonly plannerModel?: string;
     readonly planningInputHash?: string;
+    readonly plannerProtocolHash?: string;
     readonly downgradePlan?: boolean;
   },
 ): Promise<void> {
@@ -145,6 +221,7 @@ export async function savePersistedPlan(
     const provider = originalProfile?.plannerProvider ?? options?.plannerProvider;
     const model = originalProfile?.plannerModel ?? options?.plannerModel;
     const inputHash = originalProfile?.planningInputHash ?? options?.planningInputHash;
+    const protocolHash = originalProfile?.plannerProtocolHash ?? options?.plannerProtocolHash;
     const configHash = originalProfile?.plannerConfigHash ?? computePlannerConfigHash({
       provider,
       model,
@@ -152,6 +229,7 @@ export async function savePersistedPlan(
       toolVersion,
       contractSchemaVersion,
       authorMindEnabled: authorMindProvenance,
+      protocolHash,
     });
 
     value = PersistedPlanV3Schema.parse({
@@ -167,6 +245,7 @@ export async function savePersistedPlan(
         ...(provider ? { plannerProvider: provider } : {}),
         ...(model ? { plannerModel: model } : {}),
         ...(inputHash ? { planningInputHash: inputHash } : {}),
+        ...(protocolHash ? { plannerProtocolHash: protocolHash } : {}),
         plannerConfigHash: configHash,
       },
       plannerInputs: plan.plannerInputs,
@@ -191,6 +270,7 @@ export interface PlanReusabilityCheckOptions {
 /**
  * Validates whether a persisted plan matches current planning configuration and input state.
  * Returns reusable: false if config/input hashes mismatch or if Author-Mind requirement is unsatisfied.
+ * Fails closed: missing hashes in persisted profile when expected hashes are specified will reject reuse.
  */
 export function isPersistedPlanReusable(
   plan: PlanChapterOutput,
@@ -223,7 +303,13 @@ export function isPersistedPlanReusable(
     };
   }
 
-  if (options.expectedConfigHash && profile.plannerConfigHash) {
+  if (options.expectedConfigHash) {
+    if (!profile.plannerConfigHash) {
+      return {
+        reusable: false,
+        reason: "Planner configuration hash missing from persisted plan.",
+      };
+    }
     if (profile.plannerConfigHash !== options.expectedConfigHash) {
       return {
         reusable: false,
@@ -232,11 +318,17 @@ export function isPersistedPlanReusable(
     }
   }
 
-  if (options.expectedInputHash && profile.planningInputHash) {
+  if (options.expectedInputHash) {
+    if (!profile.planningInputHash) {
+      return {
+        reusable: false,
+        reason: "Planning input hash missing from persisted plan.",
+      };
+    }
     if (profile.planningInputHash !== options.expectedInputHash) {
       return {
         reusable: false,
-        reason: `Planning evidence input hash mismatch: expected ${options.expectedInputHash}, found ${profile.planningInputHash}.`,
+        reason: `Planning input hash mismatch: expected ${options.expectedInputHash}, found ${profile.planningInputHash}.`,
       };
     }
   }

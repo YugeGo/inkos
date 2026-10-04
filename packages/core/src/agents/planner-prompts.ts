@@ -151,26 +151,22 @@ export function buildPlannerUserMessage(input: {
  */
 export function buildContractRepairUserMessage(
   errors: ReadonlyArray<ContractIssue>,
-  previousSubmission?: unknown,
   language: "zh" | "en" = "zh",
 ): string {
   const errorLines = errors.map((e, idx) => `${idx + 1}. [${e.code}] at ${e.path}: ${e.message}`).join("\n");
-  const previousSubmissionBlock = previousSubmission
-    ? `## Previous Submission Context\n\`\`\`json\n${JSON.stringify(previousSubmission, null, 2)}\n\`\`\`\n`
-    : "";
 
   if (language === "en") {
     return [
       "# Contract Validation Failed (Host Diagnostic Report)",
-      previousSubmissionBlock,
       "The submitted chapter creative contract failed host validation with the following specific diagnostic issues:",
       "",
       errorLines,
       "",
       "## Targeted Repair Instructions",
-      "- Repair ONLY the specific issues listed above while preserving your previous valid creative decisions.",
+      "- Refer to your previous submission in the conversation history above.",
+      "- Repair ONLY the specific issues listed in the diagnostic report while preserving your valid creative decisions.",
       "- If a sourceRef was unverified or invalid, remove it or cite a valid evidence reference from the Planning Evidence section.",
-      "- If information targets collided between reveal and withhold, resolve the contradiction using unique semanticKeys.",
+      "- If information targets collided between reveal and withhold/boundary, resolve the contradiction using unique semanticKeys.",
       "- Do NOT invent replacement canon facts.",
       "- Resubmit the complete plan and corrected contract draft via submit_governed_plan_contract.",
     ].filter(Boolean).join("\n");
@@ -178,15 +174,14 @@ export function buildContractRepairUserMessage(
 
   return [
     "# 创作契约校验失败（宿主诊断报告）",
-    previousSubmissionBlock,
     "你提交的章节创作契约未通过宿主的一致性校验，具体错误诊断如下：",
     "",
     errorLines,
     "",
     "## 定向修复指令",
-    "1. 结合上方上一轮提交内容，仅针对上述诊断报告中列出的具体错误进行修正，保留其他合法的创作决策；",
+    "1. 请参考上方会话历史中你上一轮提交的完整草案，仅针对上述诊断报告中列出的具体错误进行修正，保留其他合法的创作决策；",
     "2. 若存在未经验证的 sourceRef 或大纲与现实混淆，请更正或移除该引用，必须引用 Planning Evidence 中存在的合法条目；",
-    "3. 若 reveal 与 withhold 存在信息目标冲突，请明晰本章究竟是揭示还是隐瞒；",
+    "3. 若 reveal 与 withhold 或 mustRemainUnknown 存在信息目标冲突，请明晰本章究竟是揭示还是隐瞒；",
     "4. 重新通过 submit_governed_plan_contract 提交完整计划与修正后的契约草案。",
   ].filter(Boolean).join("\n");
 }

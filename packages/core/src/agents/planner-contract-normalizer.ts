@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ChapterCreativeContractSchema,
   type ChapterCreativeContract,
@@ -6,12 +7,20 @@ import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import type { PlannerCreativeContractDraft } from "./planner-draft-schema.js";
 
 function sanitizeId(key: string): string {
-  return key
+  const alphanumeric = key
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 50);
+
+  if (alphanumeric.length > 0) {
+    return alphanumeric;
+  }
+
+  // Stable hash fallback for non-ASCII semanticKeys (e.g. Chinese)
+  // Ensures identical non-ASCII keys map to identical IDs and distinct keys never collide
+  return createHash("sha256").update(key.trim()).digest("hex").slice(0, 12);
 }
 
 /**

@@ -1,5 +1,19 @@
 // Models
-export { type BookConfig, type Platform, type Genre, type BookStatus, type FanficMode, BookConfigSchema, PlatformSchema, GenreSchema, BookStatusSchema, FanficModeSchema } from "./models/book.js";
+export {
+  type BookConfig,
+  type Platform,
+  type Genre,
+  type BookStatus,
+  type FanficMode,
+  type BookConfigFeatures,
+  BookConfigSchema,
+  BookConfigFeaturesSchema,
+  PlatformSchema,
+  GenreSchema,
+  BookStatusSchema,
+  FanficModeSchema,
+  resolveAuthorMindEnabled,
+} from "./models/book.js";
 export { type ChapterMeta, ChapterMetaSchema } from "./models/chapter.js";
 export { type Observation, ObservationSchema } from "./models/observation.js";
 export { type ProjectConfig, type LLMConfig, type NotifyChannel, type DetectionConfig, type AgentLLMOverride, type ResearchSearchConfig, ProjectConfigSchema, LLMConfigSchema, AgentLLMOverrideSchema, DetectionConfigSchema, ResearchSearchConfigSchema } from "./models/project.js";
@@ -187,6 +201,7 @@ export {
   PersistedPlanV3Schema,
   PlanningProfileSchema,
   computePlannerConfigHash,
+  computePlannerProtocolHash,
   computePlanningInputHash,
   isPersistedPlanReusable,
   savePersistedPlan,

@@ -54,13 +54,26 @@ import { WorkManifestSchema, type WorkManifest } from "../harness/contracts.js";
 import { syncWorkSourceArtifacts, captureWorkSourceState, changedWorkSourcePaths } from "../harness/source-sync.js";
 import { reviewChapterDraft } from "./chapter-review.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
-import { isPersistedPlanReusable, loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
-import { selectBookReferenceContext } from "../references/reference-context.js";
+import { resolveAuthorMindEnabled } from "../models/book.js";
+import {
+  computePlannerConfigHash,
+  computePlannerProtocolHash,
+  computePlanningInputHash,
+  isPersistedPlanReusable,
+  loadPersistedPlan,
+  relativeToBookDir,
+  savePersistedPlan,
+} from "./persisted-governed-plan.js";
+import { buildPlanningEvidenceBundle } from "../agents/planner-evidence.js";
+import { getAuthorMindPlannerSystemPrompt } from "../agents/planner-prompts.js";
+import { GovernedPlanContractToolSchema } from "../agents/planner-tool.js";
+import { PLANNER_PROMPT_VERSION, PLANNER_TOOL_VERSION } from "../agents/planner.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { loadAvailableAgentSkills, mergeActivatedSkillGuidance } from "../skills/index.js";
 import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 import { compileStyleGuide } from "../agents/style-guide.js";
 import { compileImportSource, renderCompleteImportSource } from "../agents/import-context.js";
+import { selectBookReferenceContext } from "../references/reference-context.js";
 
 function mergeChapterRevisionInstructions(
   persistedBrief: string,
@@ -2165,15 +2178,54 @@ export class PipelineRunner {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
     },
   ): Promise<PlanChapterOutput> {
+    const authorMindEnabled = resolveAuthorMindEnabled(book);
+
     if (
       options?.reuseExistingIntentWhenContextMissing &&
       (!externalContext || externalContext.trim().length === 0)
     ) {
       const persisted = await loadPersistedPlan(bookDir, chapterNumber);
       if (persisted) {
-        const authorMindEnabled = Boolean((book as any).authorMind);
+        let expectedConfigHash: string | undefined;
+        let expectedInputHash: string | undefined;
+
+        if (authorMindEnabled) {
+          const plannerCtx = this.agentCtxFor("planner", book.id);
+          const provider = (plannerCtx.client as any).provider ?? "unknown";
+          const model = plannerCtx.model;
+          const language = book.language ?? "zh";
+          const protocolHash = computePlannerProtocolHash({
+            systemPrompt: getAuthorMindPlannerSystemPrompt(language),
+            toolSchema: GovernedPlanContractToolSchema,
+            contractSchemaVersion: 1,
+            language,
+          });
+          expectedConfigHash = computePlannerConfigHash({
+            provider,
+            model,
+            promptVersion: PLANNER_PROMPT_VERSION,
+            toolVersion: PLANNER_TOOL_VERSION,
+            contractSchemaVersion: 1,
+            authorMindEnabled: true,
+            protocolHash,
+          });
+
+          const evidenceBundle = await buildPlanningEvidenceBundle({
+            bookDir,
+            chapterNumber,
+            currentInstruction: externalContext,
+          });
+          expectedInputHash = computePlanningInputHash({
+            chapterNumber,
+            evidenceBundle,
+            externalContext,
+          });
+        }
+
         const { reusable } = isPersistedPlanReusable(persisted, {
           expectedAuthorMindEnabled: authorMindEnabled,
+          expectedConfigHash,
+          expectedInputHash,
         });
         if (reusable) return persisted;
       }
@@ -2185,6 +2237,7 @@ export class PipelineRunner {
       bookDir,
       chapterNumber,
       externalContext,
+      authorMindEnabled,
     });
     // Persist in the new memo format so subsequent compose/write phases can
     // skip the planner LLM call when no new context is supplied.

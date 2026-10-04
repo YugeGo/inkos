@@ -44,7 +44,8 @@ export const DraftInformationTargetSchema = Type.Object({
   semanticKey: Type.String({
     minLength: 1,
     maxLength: 64,
-    description: "Semantic co-reference key (e.g. 'arthur_father_project_role') to identify identical information across reveal/withhold/mustRemainUnknown",
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+    description: "Semantic co-reference key (ASCII alphanumeric, underscore, hyphen; e.g. 'arthur_father_project_role') to identify identical information across reveal/withhold/mustRemainUnknown",
   }),
   description: Type.String({ minLength: 1, maxLength: 300, description: "Clear proposition description" }),
 });
@@ -69,7 +70,12 @@ export const DraftReaderStateSchema = Type.Object({
 });
 
 export const DraftHardConstraintSchema = Type.Object({
-  semanticKey: Type.Optional(Type.String({ maxLength: 64, description: "Optional key for this constraint" })),
+  semanticKey: Type.Optional(Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+    description: "Optional key for this constraint (ASCII alphanumeric, underscore, hyphen)",
+  })),
   statement: Type.String({ minLength: 1, maxLength: 500 }),
   source: DraftConstraintSource,
   sourceRef: Type.Optional(Type.String({ maxLength: 256, description: "Evidence reference from Planning Evidence (e.g. canon:fact#1, state:fact#2, rule:prohibition#1)" })),
@@ -85,7 +91,12 @@ export const DraftCharacterConstraintSchema = Type.Object({
 });
 
 export const DraftInformationBoundarySchema = Type.Object({
-  semanticKey: Type.Optional(Type.String({ maxLength: 64, description: "Semantic key matching information targets that must remain hidden from the reader" })),
+  semanticKey: Type.String({
+    minLength: 1,
+    maxLength: 64,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+    description: "Required semantic co-reference key (ASCII alphanumeric, underscore, hyphen) matching information targets that must remain hidden from the reader",
+  }),
   topic: Type.String({ minLength: 1, maxLength: 200 }),
   boundaryRule: Type.String({ minLength: 1, maxLength: 400 }),
 });
