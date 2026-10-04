@@ -1,10 +1,10 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import type { PlanChapterOutput } from "../agents/planner.js";
 import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import type { BookConfig } from "../models/book.js";
-import type { AgentContext } from "../agents/base.js";
+import { type AgentContext, resolveWorkerSkillActivations } from "../agents/base.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
@@ -12,6 +12,7 @@ import { loadPlanningSeedMaterials, type PlanningSeedMaterials } from "../utils/
 import { buildPlanningEvidenceBundle } from "../agents/planner-evidence.js";
 import { getAuthorMindPlannerSystemPrompt } from "../agents/planner-prompts.js";
 import { GovernedPlanContractToolSchema } from "../agents/planner-tool.js";
+import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 import { createHash } from "node:crypto";
 import {
   ChapterCreativeContractSchema,
@@ -160,26 +161,59 @@ export function computePlanningInputHash(
   return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
 }
 
+async function collectRoleFileRelativePaths(storyDir: string): Promise<string[]> {
+  const rolesDir = join(storyDir, "roles");
+  const results: string[] = [];
+  async function walk(dir: string, relPrefix: string) {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          await walk(join(dir, entry.name), rel);
+        } else if (entry.isFile() && entry.name.endsWith(".md")) {
+          results.push(`roles/${rel}`);
+        }
+      }
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+  }
+  await walk(rolesDir, "");
+  return results;
+}
+
 /**
- * Computes deterministic content checksums for story seed files
- * to invalidate cached plan if user/author directly edits outline or intent files.
+ * Computes deterministic content checksums for story seed and context candidate files
+ * to invalidate cached plan if user/author directly edits outline, style, roles, or state files.
  */
 export async function computeRelevantSourcesChecksum(
   bookDir: string,
 ): Promise<ReadonlyArray<{ path: string; hash: string }>> {
   const storyDir = join(bookDir, "story");
-  const relativeTargets = [
+  const staticTargets = [
     "author_intent.md",
     "current_focus.md",
     "brief.md",
     "book_rules.json",
     "book_rules.md",
+    "style_guide.md",
+    "parent_canon.md",
+    "fanfic_canon.md",
+    "volume_summaries.md",
     "outline/story_frame.md",
     "outline/volume_map.md",
+    "state/manifest.json",
+    "state/current_state.json",
+    "state/hooks.json",
+    "state/chapter_summaries.json",
   ];
 
+  const roleTargets = await collectRoleFileRelativePaths(storyDir);
+  const allTargets = Array.from(new Set([...staticTargets, ...roleTargets])).sort((a, b) => a.localeCompare(b));
+
   const results: Array<{ path: string; hash: string }> = [];
-  for (const relPath of relativeTargets) {
+  for (const relPath of allTargets) {
     const fullPath = join(storyDir, relPath);
     try {
       const content = await readFile(fullPath, "utf-8");
@@ -193,27 +227,42 @@ export async function computeRelevantSourcesChecksum(
 }
 
 /**
- * Deterministic fingerprint for activated skills.
+ * Computes deterministic content fingerprint across activated skills,
+ * including skill body, resource paths, offsets, and resource content hashes.
  */
 export function computeSkillsFingerprint(
   skills?: ReadonlyArray<ActivatedSkillGuidance | { name: string; guidance?: string }>,
 ): string {
   if (!skills || skills.length === 0) return "";
-  const items = skills.map((s) => {
-    if ("skill" in s) {
-      return {
-        id: s.skill.id,
-        content: (s.resources ?? []).map((r) => r.path).join(","),
-      };
+  const lines: string[] = [];
+  for (const item of skills) {
+    if ("skill" in item) {
+      const skillId = item.skill.id;
+      const skillName = item.skill.name;
+      const skillBody = item.skill.body?.trim() || item.skill.description || "";
+      const skillBodyHash = createHash("sha256").update(skillBody).digest("hex").slice(0, 16);
+
+      const resourceLines: string[] = [];
+      const resources = [...(item.resources ?? [])].sort((a, b) => {
+        const pathCmp = a.path.localeCompare(b.path);
+        if (pathCmp !== 0) return pathCmp;
+        return a.charStart - b.charStart;
+      });
+
+      for (const res of resources) {
+        const resBodyHash = createHash("sha256").update(res.body ?? "").digest("hex").slice(0, 16);
+        resourceLines.push(`${res.path}:${res.charStart}:${res.charEnd}:${resBodyHash}`);
+      }
+
+      lines.push(`skill|${skillId}|${skillName}|${skillBodyHash}|${resourceLines.join(";")}`);
+    } else {
+      const name = item.name;
+      const guidanceHash = createHash("sha256").update(item.guidance ?? "").digest("hex").slice(0, 16);
+      lines.push(`customSkill|${name}|${guidanceHash}`);
     }
-    return {
-      id: s.name,
-      content: s.guidance ?? "",
-    };
-  });
-  const sorted = [...items].sort((a, b) => a.id.localeCompare(b.id));
-  const payload = sorted.map((s) => `${s.id}:${s.content}`).join("\n");
-  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+  }
+  lines.sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
 }
 
 export interface PreparedPlanningFingerprint {
@@ -266,8 +315,8 @@ export async function preparePlanningFingerprint(params: {
   const provider = client?.provider ?? "unknown";
   const service = client?.service ?? client?.config?.service ?? "";
   const model = params.plannerCtx.model;
-
-  const skillFingerprint = computeSkillsFingerprint(params.plannerCtx.activatedSkills);
+  const resolvedSkills = await resolveWorkerSkillActivations(params.plannerCtx, taskGoal, true);
+  const skillFingerprint = computeSkillsFingerprint(resolvedSkills);
 
   const protocolHash = computePlannerProtocolHash({
     systemPrompt: getAuthorMindPlannerSystemPrompt(language),
@@ -430,21 +479,28 @@ export async function savePersistedPlan(
       plannerInputs: plan.plannerInputs,
     });
   } else {
-    // Before overwriting an existing V3 plan on disk with a V2 plan, archive it safely
+    // Before overwriting an existing V3 plan on disk with a V2 plan, archive it safely and atomically
     const targetPath = planPath(bookDir, plan.memo.chapter);
+    let existingRaw: string | undefined;
     try {
-      const existingRaw = await readFile(targetPath, "utf-8");
-      const existingJson = JSON.parse(existingRaw);
-      if (existingJson?.version === 3 && existingJson?.creativeContract) {
-        const historyDir = join(bookDir, "story", "runtime", "history");
-        await mkdir(historyDir, { recursive: true });
-        const padded = String(plan.memo.chapter).padStart(4, "0");
-        const archiveFilename = `chapter-${padded}.plan.author-mind.${Date.now()}.json`;
-        await writeFile(join(historyDir, archiveFilename), existingRaw, "utf-8");
-      }
+      existingRaw = await readFile(targetPath, "utf-8");
     } catch (err: any) {
-      if (err?.code !== "ENOENT") {
-        // Non-fatal if read/archive fails, but don't crash
+      if (err?.code !== "ENOENT") throw err;
+    }
+
+    let archiveFilename: string | undefined;
+    if (existingRaw) {
+      let existingJson: any;
+      try {
+        existingJson = JSON.parse(existingRaw);
+      } catch (parseErr: any) {
+        throw new Error(
+          `Failed to parse existing plan at ${targetPath} before downgrade: ${parseErr.message} (Fail-Closed)`
+        );
+      }
+      if (existingJson?.version === 3 && existingJson?.creativeContract) {
+        const padded = String(plan.memo.chapter).padStart(4, "0");
+        archiveFilename = `chapter-${padded}.plan.author-mind.${Date.now()}.json`;
       }
     }
 
@@ -454,6 +510,22 @@ export async function savePersistedPlan(
       memo: plan.memo,
       plannerInputs: plan.plannerInputs,
     });
+
+    if (archiveFilename && existingRaw) {
+      const runtimeDir = join(bookDir, "story", "runtime");
+      const padded = String(plan.memo.chapter).padStart(4, "0");
+      const planFilename = `chapter-${padded}.plan.json`;
+      const planContent = `${JSON.stringify(value, null, 2)}\n`;
+
+      await commitAtomicFileSet({
+        rootDir: runtimeDir,
+        writes: [
+          { relativePath: `history/${archiveFilename}`, content: existingRaw },
+          { relativePath: planFilename, content: planContent },
+        ],
+      });
+      return;
+    }
   }
   await writeFile(planPath(bookDir, plan.memo.chapter), `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }

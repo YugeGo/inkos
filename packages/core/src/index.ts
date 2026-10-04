@@ -520,7 +520,7 @@ export { getAllEndpoints, getEndpoint, type InkosEndpoint, type InkosModel, type
 export { probeModelsFromUpstream, type ProbedModel } from "./llm/providers/probe.js";
 
 // Agents
-export { BaseAgent, type AgentContext } from "./agents/base.js";
+export { BaseAgent, resolveWorkerSkillActivations, type AgentContext } from "./agents/base.js";
 export { ArchitectAgent, type ArchitectOutput } from "./agents/architect.js";
 export { WriterAgent, type WriteChapterInput, type WriteChapterOutput, type TokenUsage } from "./agents/writer.js";
 export { ContinuityAuditor, type AuditResult } from "./agents/continuity.js";

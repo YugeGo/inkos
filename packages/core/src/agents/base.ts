@@ -104,6 +104,38 @@ export abstract class BaseAgent {
   }
 }
 
+export async function resolveWorkerSkillActivations(
+  context: Pick<AgentContext, "activatedSkills" | "bookId"> & { readonly projectRoot?: string },
+  query = "",
+  professionalGuidance = true,
+): Promise<ReadonlyArray<ActivatedSkillGuidance>> {
+  let work = currentExecutionWork();
+  if (context.bookId && context.projectRoot && work?.id !== context.bookId) {
+    work = null;
+    try {
+      work = await loadWorkManifest(context.projectRoot, context.bookId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const scopedProfile = currentExecutionProfile();
+  const profile = work && scopedProfile?.id !== work.profileId
+    ? createBuiltInWorkProfileRegistry(context.projectRoot).require(work.profileId)
+    : scopedProfile ?? createBuiltInWorkProfileRegistry(context.projectRoot).require("workspace-default");
+  let selectedSkills = context.activatedSkills;
+  const requiredIds = [...profile.requiredSkillIds, ...requiredWorkSkillIds(work)];
+  if (professionalGuidance && requiredIds.some((id) => !selectedSkills?.some((item) => item.skill.id === id))) {
+    const available = await loadAvailableAgentSkills({ projectRoot: context.projectRoot ?? "" });
+    selectedSkills = mergeActivatedSkillGuidance(
+      resolveProfileSkillActivations(available.skills, profile),
+      resolveWorkSkillActivations(available.skills, work),
+      selectedSkills ?? [],
+    );
+  }
+  const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) : undefined;
+  return activations ?? [];
+}
+
 export async function prepareWorkerMessages(
   context: Pick<AgentContext, "client" | "activatedSkills" | "signal" | "bookId"> & { readonly projectRoot?: string },
   messages: ReadonlyArray<LLMMessage>, maxTokens?: number, workerId = "worker",
@@ -120,23 +152,15 @@ export async function prepareWorkerMessages(
       try {work=await loadWorkManifest(context.projectRoot,context.bookId);}
       catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     }
+    const scopedProfile = currentExecutionProfile();
+    const profile = work && scopedProfile?.id !== work.profileId
+      ? createBuiltInWorkProfileRegistry(context.projectRoot).require(work.profileId)
+      : scopedProfile ?? createBuiltInWorkProfileRegistry(context.projectRoot).require("workspace-default");
     const query = messages
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n\n");
-    const scopedProfile=currentExecutionProfile();
-    const profile=work && scopedProfile?.id!==work.profileId
-      ? createBuiltInWorkProfileRegistry(context.projectRoot).require(work.profileId)
-      : scopedProfile ?? createBuiltInWorkProfileRegistry(context.projectRoot).require("workspace-default");
-    let selectedSkills=context.activatedSkills;
-    const requiredIds=[...profile.requiredSkillIds,...requiredWorkSkillIds(work)];
-    if(professionalGuidance&&requiredIds.some(id=>!selectedSkills?.some(item=>item.skill.id===id))) {
-      const available=await loadAvailableAgentSkills({projectRoot:context.projectRoot ?? ""});
-      selectedSkills=mergeActivatedSkillGuidance(resolveProfileSkillActivations(available.skills,profile),resolveWorkSkillActivations(available.skills,work),selectedSkills ?? []);
-    }
-    // Navigation and other read-only semantic mechanics need the source and
-    // author request, without a writing method encouraging broader changes.
-    const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) : [];
+    const activations = await resolveWorkerSkillActivations(context, query, professionalGuidance);
     recordExecutionEvidence("skills-applied", { worker: workerId, skills: activations?.map(({ skill, resources }) => ({
       id: skill.id, source: skill.source, hash: createHash("sha256").update(skill.body).digest("hex"),
       references: resources.map(resource => ({ path: resource.path, charStart: resource.charStart, charEnd: resource.charEnd,

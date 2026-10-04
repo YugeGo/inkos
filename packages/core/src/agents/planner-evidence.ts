@@ -47,26 +47,44 @@ export async function buildPlanningEvidenceBundle(params: {
 
   // 1. Authoritative Runtime State & Historical Canon Facts via RuntimeStateStore
   const stateDir = join(storyDir, "state");
-  const manifestPath = join(stateDir, "manifest.json");
-  let manifestExists = false;
-  try {
-    await stat(manifestPath);
-    manifestExists = true;
-  } catch (err: any) {
-    if (err?.code !== "ENOENT") throw err;
+  const authoritativeStateFiles = [
+    "manifest.json",
+    "current_state.json",
+    "hooks.json",
+    "chapter_summaries.json",
+  ] as const;
+
+  const presentFiles: string[] = [];
+  const missingFiles: string[] = [];
+  for (const file of authoritativeStateFiles) {
+    try {
+      await stat(join(stateDir, file));
+      presentFiles.push(file);
+    } catch (err: any) {
+      if (err?.code === "ENOENT") {
+        missingFiles.push(file);
+      } else {
+        throw err;
+      }
+    }
   }
 
   let snapshot: RuntimeStateSnapshot | null = null;
-  try {
-    snapshot = await loadRuntimeStateSnapshot(params.bookDir);
-  } catch (error: any) {
-    if (!manifestExists && (error?.code === "ENOENT" || error?.message?.includes("ENOENT"))) {
-      // Inception state before runtime state store initialization
-      snapshot = null;
-    } else {
-      // Authoritative runtime state exists (or manifest exists) but is corrupted or missing files: Fail-Closed!
+  if (presentFiles.length === 0) {
+    // Inception state: no runtime state has been initialized yet
+    snapshot = null;
+  } else if (presentFiles.length === authoritativeStateFiles.length) {
+    // All 4 authoritative state files exist: strict load
+    try {
+      snapshot = await loadRuntimeStateSnapshot(params.bookDir);
+    } catch (error: any) {
       throw new Error(`Authoritative runtime state is invalid or corrupted (Fail-Closed): ${error.message}`);
     }
+  } else {
+    // 1 to 3 files present: corrupted partial state!
+    throw new Error(
+      `Authoritative runtime state is corrupted: incomplete state files (present: ${presentFiles.length}/${authoritativeStateFiles.length}, missing: ${missingFiles.join(", ")}) (Fail-Closed)`
+    );
   }
 
   if (snapshot) {

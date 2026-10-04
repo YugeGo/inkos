@@ -12,6 +12,7 @@ import {
   computePlannerConfigHash,
   computePlannerProtocolHash,
   computePlanningInputHash,
+  computeRelevantSourcesChecksum,
   preparePlanningFingerprint,
   resolveAuthorMindEnabled,
   savePersistedPlan,
@@ -325,7 +326,22 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
         bookDir: tempDir,
         chapterNumber: 1,
       }),
-    ).rejects.toThrow(/Authoritative runtime state is invalid or corrupted \(Fail-Closed\)/);
+    ).rejects.toThrow(/Authoritative runtime state is corrupted: incomplete state files/);
+  });
+
+  it("fails closed when state files are partially present even if manifest.json is also missing", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const stateDir = join(tempDir, "story", "state");
+    // Delete BOTH manifest.json AND hooks.json, leaving 2/4 files
+    await rm(join(stateDir, "manifest.json"), { force: true });
+    await rm(join(stateDir, "hooks.json"), { force: true });
+
+    await expect(
+      buildPlanningEvidenceBundle({
+        bookDir: tempDir,
+        chapterNumber: 1,
+      }),
+    ).rejects.toThrow(/Authoritative runtime state is corrupted: incomplete state files \(present: 2\/4, missing: manifest\.json, hooks\.json\)/);
   });
 
   it("fails closed when book_rules.json exists but is schema-invalid", async () => {
@@ -1104,5 +1120,66 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     expect(archivedJson.version).toBe(3);
     expect(archivedJson.creativeContract).toBeDefined();
     expect(archivedJson.memo.goal).toBe("V3 规划");
+  });
+
+  it("invalidates planningInputHash when role card (Arthur.md) content is modified", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const storyDir = join(tempDir, "story");
+    const rolesDir = join(storyDir, "roles", "主要角色");
+    await mkdir(rolesDir, { recursive: true });
+    await writeFile(join(rolesDir, "Arthur.md"), "# Arthur\n性格谨慎，从不轻信他人。", "utf-8");
+
+    const checksumsBefore = await computeRelevantSourcesChecksum(tempDir);
+    const arthurChecksumBefore = checksumsBefore.find((c) => c.path.includes("Arthur.md"));
+    expect(arthurChecksumBefore).toBeDefined();
+
+    // Modify Arthur.md content
+    await writeFile(join(rolesDir, "Arthur.md"), "# Arthur\n此时决定主动信任 Clara。", "utf-8");
+
+    const checksumsAfter = await computeRelevantSourcesChecksum(tempDir);
+    const arthurChecksumAfter = checksumsAfter.find((c) => c.path.includes("Arthur.md"));
+    expect(arthurChecksumAfter).toBeDefined();
+    expect(arthurChecksumAfter?.hash).not.toBe(arthurChecksumBefore?.hash);
+  });
+
+  it("invalidates planningInputHash when style_guide.md is modified", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const storyDir = join(tempDir, "story");
+    await writeFile(join(storyDir, "style_guide.md"), "风格：严肃写实", "utf-8");
+
+    const checksumsBefore = await computeRelevantSourcesChecksum(tempDir);
+    const styleChecksumBefore = checksumsBefore.find((c) => c.path === "style_guide.md");
+    expect(styleChecksumBefore).toBeDefined();
+
+    await writeFile(join(storyDir, "style_guide.md"), "风格：严肃写实，增加黑色幽默与讽刺", "utf-8");
+    const checksumsAfter = await computeRelevantSourcesChecksum(tempDir);
+    const styleChecksumAfter = checksumsAfter.find((c) => c.path === "style_guide.md");
+    expect(styleChecksumAfter).toBeDefined();
+    expect(styleChecksumAfter?.hash).not.toBe(styleChecksumBefore?.hash);
+  });
+
+  it("savePersistedPlan fails closed and prevents overwrite if existing plan is corrupted before downgrade", async () => {
+    const runtimeDir = join(tempDir, "story", "runtime");
+    await mkdir(runtimeDir, { recursive: true });
+
+    // Corrupted existing plan on disk
+    const planFile = join(runtimeDir, "chapter-0001.plan.json");
+    await writeFile(planFile, "{ invalid json content ...", "utf-8");
+
+    const v2Plan: PlanChapterOutput = {
+      intent: { chapter: 1, goal: "V2 规划" },
+      memo: { chapter: 1, goal: "V2 规划", body: "原生正文...", threadRefs: [] },
+      intentMarkdown: "原生投影",
+      plannerInputs: [],
+      runtimePath: join(runtimeDir, "chapter-0001.intent.md"),
+    };
+
+    await expect(
+      savePersistedPlan(tempDir, v2Plan, { authorMindEnabled: false, downgradePlan: true }),
+    ).rejects.toThrow(/Failed to parse existing plan.*\(Fail-Closed\)/);
+
+    // Verify existing file was not overwritten
+    const contentAfter = await readFile(planFile, "utf-8");
+    expect(contentAfter).toBe("{ invalid json content ...");
   });
 });
