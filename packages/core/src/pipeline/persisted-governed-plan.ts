@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import type { PlanChapterOutput } from "../agents/planner.js";
+import { createHash } from "node:crypto";
 import {
   ChapterCreativeContractSchema,
   ChapterIntentSchema,
@@ -11,7 +12,30 @@ import {
 } from "../models/input-governance.js";
 
 /**
- * Planning profile tracking feature flags and contract schema version
+ * Computes deterministic fingerprint hash for planning configuration
+ * to ensure cache invalidation when model/prompt/schema changes.
+ */
+export function computePlannerConfigHash(params: {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly promptVersion?: string;
+  readonly toolVersion?: number;
+  readonly contractSchemaVersion?: number;
+  readonly authorMindEnabled: boolean;
+}): string {
+  const payload = JSON.stringify({
+    provider: params.provider ?? "",
+    model: params.model ?? "",
+    promptVersion: params.promptVersion ?? "",
+    toolVersion: params.toolVersion ?? 0,
+    contractSchemaVersion: params.contractSchemaVersion ?? 0,
+    authorMindEnabled: params.authorMindEnabled,
+  });
+  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+/**
+ * Planning profile tracking feature flags, model identifiers, and contract schema version
  * for plan cache fingerprinting.
  */
 export const PlanningProfileSchema = z.object({
@@ -19,6 +43,9 @@ export const PlanningProfileSchema = z.object({
   contractSchemaVersion: z.number().int().positive().optional(),
   plannerPromptVersion: z.string().min(1).optional(),
   plannerToolVersion: z.number().int().positive().optional(),
+  plannerProvider: z.string().min(1).optional(),
+  plannerModel: z.string().min(1).optional(),
+  plannerConfigHash: z.string().min(1).optional(),
 }).strict();
 export type PlanningProfile = z.infer<typeof PlanningProfileSchema>;
 
@@ -64,33 +91,60 @@ export async function savePersistedPlan(
     readonly authorMindEnabled?: boolean;
     readonly plannerPromptVersion?: string;
     readonly plannerToolVersion?: number;
+    readonly plannerProvider?: string;
+    readonly plannerModel?: string;
+    readonly downgradePlan?: boolean;
   },
 ): Promise<void> {
   const authorMindEnabled = options?.authorMindEnabled ?? (plan.planningProfile?.authorMindEnabled ?? Boolean(plan.creativeContract));
-  const shouldSaveV3 = Boolean(plan.creativeContract) || (authorMindEnabled && options?.authorMindEnabled !== false);
+  
+  // Non-destructive preservation: An existing contract in V3 is preserved even if authorMind is disabled,
+  // unless caller explicitly passes downgradePlan: true.
+  const shouldSaveV3 = !options?.downgradePlan && (Boolean(plan.creativeContract) || authorMindEnabled);
 
-  const value: PersistedPlan = shouldSaveV3
-    ? PersistedPlanV3Schema.parse({
-        version: 3,
-        intent: plan.intent,
-        memo: plan.memo,
-        ...(plan.creativeContract ? { creativeContract: plan.creativeContract } : {}),
-        planningProfile: {
-          authorMindEnabled,
-          ...(plan.creativeContract ? { contractSchemaVersion: plan.creativeContract.schemaVersion } : plan.planningProfile?.contractSchemaVersion ? { contractSchemaVersion: plan.planningProfile.contractSchemaVersion } : {}),
-          ...(options?.plannerPromptVersion ? { plannerPromptVersion: options.plannerPromptVersion } : plan.planningProfile?.plannerPromptVersion ? { plannerPromptVersion: plan.planningProfile.plannerPromptVersion } : {}),
-          ...(options?.plannerToolVersion ? { plannerToolVersion: options.plannerToolVersion } : plan.planningProfile?.plannerToolVersion ? { plannerToolVersion: plan.planningProfile.plannerToolVersion } : {}),
-        },
-        plannerInputs: plan.plannerInputs,
-      })
-    : PersistedPlanV2Schema.parse({
-        version: 2,
-        intent: plan.intent,
-        memo: plan.memo,
-        plannerInputs: plan.plannerInputs,
-      });
+  let value: PersistedPlan;
+  if (shouldSaveV3) {
+    const contractSchemaVersion = plan.creativeContract ? plan.creativeContract.schemaVersion : plan.planningProfile?.contractSchemaVersion;
+    const promptVersion = options?.plannerPromptVersion ?? plan.planningProfile?.plannerPromptVersion;
+    const toolVersion = options?.plannerToolVersion ?? plan.planningProfile?.plannerToolVersion;
+    const provider = options?.plannerProvider ?? plan.planningProfile?.plannerProvider;
+    const model = options?.plannerModel ?? plan.planningProfile?.plannerModel;
+    const configHash = computePlannerConfigHash({
+      provider,
+      model,
+      promptVersion,
+      toolVersion,
+      contractSchemaVersion,
+      authorMindEnabled,
+    });
+
+    value = PersistedPlanV3Schema.parse({
+      version: 3,
+      intent: plan.intent,
+      memo: plan.memo,
+      ...(plan.creativeContract ? { creativeContract: plan.creativeContract } : {}),
+      planningProfile: {
+        authorMindEnabled,
+        ...(contractSchemaVersion ? { contractSchemaVersion } : {}),
+        ...(promptVersion ? { plannerPromptVersion: promptVersion } : {}),
+        ...(toolVersion ? { plannerToolVersion: toolVersion } : {}),
+        ...(provider ? { plannerProvider: provider } : {}),
+        ...(model ? { plannerModel: model } : {}),
+        plannerConfigHash: configHash,
+      },
+      plannerInputs: plan.plannerInputs,
+    });
+  } else {
+    value = PersistedPlanV2Schema.parse({
+      version: 2,
+      intent: plan.intent,
+      memo: plan.memo,
+      plannerInputs: plan.plannerInputs,
+    });
+  }
   await writeFile(planPath(bookDir, plan.memo.chapter), `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
+
 
 export async function loadPersistedPlan(
   bookDir: string,

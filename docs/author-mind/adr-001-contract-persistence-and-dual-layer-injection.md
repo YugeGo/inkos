@@ -92,3 +92,35 @@ $$\text{CreativeContract (Machine JSON)} \xrightarrow{\text{Contract Compiler}} 
 ### 决策 10：两层 Schema 与宿主归一化（Host Normalization）
 * **决定**：LLM Tool Schema（`PlannerCreativeContractDraftSchema`）仅负责创作决策字段，不要求模型生成系统级元数据（如 `schemaVersion`、自增 ID 等）；由宿主函数 `normalizePlannerContract` 统一注入权威版本号与指纹，并在持久化前通过 `validateCreativeContractSemantics` 实施严格语义冲突校验。
 
+### 决策 11：引入 `InformationTarget` 语义 ID，取代脆弱的字符串交集
+* **决定**：
+  1. `plannedAuthorIntent.informationStrategy` 中 `reveal` 与 `withhold` 均采用 `InformationTarget = { id: string, description: string }` 结构。
+  2. 信息控制逻辑严禁依赖中文自然语言字符串做交集计算，全部升级为确定性的 ID 计算：$\text{reveal.ids} \cap \text{withhold.ids} = \emptyset$ 且 $\text{reveal.ids} \cap \text{mustRemainUnknown.ids} = \emptyset$。
+  3. 为未来章节级、全局级统一的 `Information Registry` 奠定数据结构契约。
+
+### 决策 12：Evidence Authority 分类与 Canon 边界隔离
+* **决定**：
+  1. 大纲材料（如 `story_frame.md`、分卷规划）属于未来计划与创作意图，**绝不等同于已发生的既定事实**。
+  2. 确立 `PlanningEvidenceBundle` 的分层权威分类：`canon`（已发生事实）、`runtime_state`（当前事实）、`book_rule`（设定法则）、`outline`（未来意向，非现实）、`author_instruction`（用户意图）。
+  3. 严禁 Planner 将 `outline` 意向标记为 `source: "canon"`，否则语义校验器直接报错拦截。
+
+### 决策 13：四级 Contract Authority 模型与规则冲突优先级
+* **决定**：
+  1. 约束属性由模糊的 `severity` 明确定义为优先级 `priority`（`absolute` > `strong`）。
+  2. 确立四级契约执行权威体系：
+     * **L0 — ABSOLUTE**：不可突破的 Canon 事实、世界法则与绝对禁止泄露机密（直通 Writer 顶级硬规则栈）；
+     * **L1 — STRONG**：人物心理与行为硬边界、关键叙事隔离（仅在与 L0 冲突时方可让步）；
+     * **L2 — SOFT**：Human Core、Reader Transition 心理引导、创作意图（高优先级软性引导）；
+     * **L3 — FREEDOM**：Writer Creative Latitude（明确放权给 Writer 自由发挥与留白）。
+
+### 决策 14：全局 Token 预算防御与约束压力（Constraint Pressure）监控
+* **决定**：
+  1. 在 Zod 局部字段 `max()` 之外，增加整体契约 Token 估算器 `estimateContractTokens` 与全局上限（默认 4000 tokens），防止各字段全满导致运输上下文溢出。
+  2. 引入 `Constraint Pressure`（约束压力）工程诊断指标（`low` / `medium` / `high`），度量规则对 Writer 的限制程度，及时预警“契约沦为铁轨而非围栏”的风险。
+
+### 决策 15：确定性指纹哈希与 V3 非破坏性持久化
+* **决定**：
+  1. `PlanningProfile` 引入 `plannerProvider`、`plannerModel` 与 `plannerConfigHash`，由 Provider、Model、Prompt、Tool 和 Schema 版本联合计算 16 位确定性哈希，杜绝更换模型时的伪缓存命中。
+  2. 当存在已有 V3 契约且用户关闭 `authorMind` 开关时，默认普通保存绝不抹除契约，仅在消费端通过特性开关忽略；唯有显式指定 `downgradePlan: true` 时才降级为 V2。
+
+

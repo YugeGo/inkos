@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  type PlanningEvidenceBundle,
+  lookupEvidenceRef,
+} from "./evidence-bundle.js";
 
 /**
  * Belief strength of the simulated reader.
@@ -10,14 +14,33 @@ export type BeliefStrength = z.infer<typeof BeliefStrengthSchema>;
 export const QuestionSalienceSchema = z.enum(["low", "medium", "high"]);
 export type QuestionSalience = z.infer<typeof QuestionSalienceSchema>;
 
-export const ConstraintSeveritySchema = z.enum(["absolute", "strong"]);
-export type ConstraintSeverity = z.infer<typeof ConstraintSeveritySchema>;
+/**
+ * Constraint priority in conflict resolution (Precedence):
+ * - absolute: Non-negotiable hard boundary (compiled to top of Writer rule stack).
+ * - strong: High-priority constraint; breachable only if in direct conflict with an absolute rule.
+ */
+export const ConstraintPrioritySchema = z.enum(["absolute", "strong"]);
+export type ConstraintPriority = z.infer<typeof ConstraintPrioritySchema>;
+
+/** Backwards-compatible alias */
+export const ConstraintSeveritySchema = ConstraintPrioritySchema;
+export type ConstraintSeverity = ConstraintPriority;
 
 export const ConstraintSourceSchema = z.enum(["canon", "world", "logic", "author"]);
 export type ConstraintSource = z.infer<typeof ConstraintSourceSchema>;
 
 export const PlotProgressLevelSchema = z.enum(["none", "low", "medium", "high"]);
 export type PlotProgressLevel = z.infer<typeof PlotProgressLevelSchema>;
+
+/**
+ * Information target with a stable semantic ID and descriptive text.
+ * Used for precise, computable information boundary control (reveal / withhold / mustRemainUnknown).
+ */
+export const InformationTargetSchema = z.object({
+  id: z.string().min(1).max(64),
+  description: z.string().min(1).max(300),
+}).strict();
+export type InformationTarget = z.infer<typeof InformationTargetSchema>;
 
 /** Reader belief regarding a specific story fact or mystery */
 export const ReaderBeliefSchema = z.object({
@@ -47,13 +70,14 @@ export const ReaderStateSchema = z.object({
 }).strict();
 export type ReaderState = z.infer<typeof ReaderStateSchema>;
 
-/** Hard constraint with a stable ID, source provenance, and severity for automated auditing */
+/** Hard constraint with a stable ID, source provenance, and priority for automated auditing */
 export const HardConstraintSchema = z.object({
   id: z.string().min(1).max(64),
   statement: z.string().min(1).max(500),
   source: ConstraintSourceSchema,
   sourceRef: z.string().min(1).max(256).optional(),
-  severity: ConstraintSeveritySchema,
+  priority: ConstraintPrioritySchema.default("absolute"),
+  severity: ConstraintPrioritySchema.optional(),
 }).strict();
 export type HardConstraint = z.infer<typeof HardConstraintSchema>;
 
@@ -90,12 +114,13 @@ export type ReaderTransition = z.infer<typeof ReaderTransitionSchema>;
 /**
  * Planned Author Intent: Forward-looking creative strategy for our own novel generation.
  * (Contrast with InferredAuthorIntentHypothesis used in reverse-engineering external books).
+ * Information strategy uses stable InformationTarget IDs for deterministic conflict computation.
  */
 export const PlannedAuthorIntentSchema = z.object({
   readerEffects: z.array(z.string().min(1).max(300)).max(8),
   informationStrategy: z.object({
-    reveal: z.array(z.string().min(1).max(300)).max(10),
-    withhold: z.array(z.string().min(1).max(300)).max(10),
+    reveal: z.array(InformationTargetSchema).max(10),
+    withhold: z.array(InformationTargetSchema).max(10),
   }).strict(),
   attentionStrategy: z.array(z.string().min(1).max(300)).max(8),
   emotionalTrajectory: z.array(z.string().min(1).max(300)).max(8),
@@ -169,7 +194,7 @@ const BaseChapterCreativeContractSchema = z.object({
 /**
  * The Master Creative Contract Schema (Version 1).
  * "Chapter Contract is a fence, not a railroad."
- * Enforces volume bounds and non-duplicate stable IDs across constraints and boundaries.
+ * Enforces volume bounds, non-duplicate stable IDs, and ID-based information conflict prevention.
  */
 export const ChapterCreativeContractSchema = BaseChapterCreativeContractSchema.superRefine((data, ctx) => {
   const hardConstraintIds = new Set<string>();
@@ -217,6 +242,277 @@ export const ChapterCreativeContractSchema = BaseChapterCreativeContractSchema.s
     }
     shortcutCodes.add(code);
   }
+
+  // ID-based Information Target Validation
+  const revealIds = new Set<string>();
+  for (let i = 0; i < data.plannedAuthorIntent.informationStrategy.reveal.length; i++) {
+    const target = data.plannedAuthorIntent.informationStrategy.reveal[i];
+    if (revealIds.has(target.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate informationTarget id "${target.id}" in reveal at index ${i}`,
+        path: ["plannedAuthorIntent", "informationStrategy", "reveal", i, "id"],
+      });
+    }
+    revealIds.add(target.id);
+
+    // reveal ∩ mustRemainUnknown = ∅
+    if (boundaryIds.has(target.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Information target "${target.id}" is marked for reveal but also listed in mustRemainUnknown`,
+        path: ["plannedAuthorIntent", "informationStrategy", "reveal", i, "id"],
+      });
+    }
+  }
+
+  const withholdIds = new Set<string>();
+  for (let i = 0; i < data.plannedAuthorIntent.informationStrategy.withhold.length; i++) {
+    const target = data.plannedAuthorIntent.informationStrategy.withhold[i];
+    if (withholdIds.has(target.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate informationTarget id "${target.id}" in withhold at index ${i}`,
+        path: ["plannedAuthorIntent", "informationStrategy", "withhold", i, "id"],
+      });
+    }
+    withholdIds.add(target.id);
+
+    // reveal ∩ withhold = ∅
+    if (revealIds.has(target.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Information target "${target.id}" cannot be in both reveal and withhold strategies`,
+        path: ["plannedAuthorIntent", "informationStrategy", "withhold", i, "id"],
+      });
+    }
+  }
 });
 
 export type ChapterCreativeContract = z.infer<typeof ChapterCreativeContractSchema>;
+
+/** Default maximum token budget for the entire Creative Contract (transport guard) */
+export const DEFAULT_MAX_CONTRACT_TOKENS = 4000;
+
+/**
+ * Heuristic estimation of tokens consumed by the contract payload.
+ * CJK characters count ~1.3 tokens each; ASCII/code syntax ~0.35 tokens per char.
+ */
+export function estimateContractTokens(contract: ChapterCreativeContract): number {
+  const json = JSON.stringify(contract);
+  let cjkCount = 0;
+  let nonCjkCount = 0;
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i);
+    if (code >= 0x4e00 && code <= 0x9fff) {
+      cjkCount++;
+    } else {
+      nonCjkCount++;
+    }
+  }
+  return Math.ceil(cjkCount * 1.3 + nonCjkCount * 0.35);
+}
+
+export type ConstraintPressureLevel = "low" | "medium" | "high";
+
+export interface ConstraintPressure {
+  readonly score: number; // 0 to 100
+  readonly level: ConstraintPressureLevel;
+  readonly breakdown: {
+    readonly hardConstraintsCount: number;
+    readonly characterLocksCount: number;
+    readonly unknownBoundariesCount: number;
+    readonly forbiddenShortcutsCount: number;
+    readonly freedomCount: number;
+  };
+  readonly details: string;
+}
+
+/**
+ * Computes constraint pressure score (0 to 100) indicating how heavily constrained the Writer is.
+ * Used for diagnostic telemetry and alerting when the contract is becoming a "railroad" rather than a "fence".
+ */
+export function computeConstraintPressure(contract: ChapterCreativeContract): ConstraintPressure {
+  const hardConstraintsCount = contract.hardConstraints.length;
+  let characterLocksCount = 0;
+  for (const cc of contract.characterConstraints) {
+    characterLocksCount += (cc.mustNotKnow?.length ?? 0) + (cc.beliefsThatMustPersist?.length ?? 0) + (cc.behavioralLimits?.length ?? 0);
+  }
+  const unknownBoundariesCount = contract.readerTransition.mustRemainUnknown.length;
+  const forbiddenShortcutsCount = contract.forbiddenShortcuts.length;
+  const freedomCount = contract.freedomZone.mayInvent.length + contract.freedomZone.mayVary.length + contract.freedomZone.mustRemainUnderspecified.length;
+
+  // Pressure adds points; freedom relieves points
+  const rawScore = (hardConstraintsCount * 4) + (characterLocksCount * 2.5) + (unknownBoundariesCount * 3) + (forbiddenShortcutsCount * 3.5) - (freedomCount * 2);
+  const score = Math.max(0, Math.min(100, Math.round(rawScore)));
+
+  const level: ConstraintPressureLevel = score >= 50 ? "high" : score >= 25 ? "medium" : "low";
+  const details = `Pressure score ${score}/100 (${level}): ${hardConstraintsCount} hard rules, ${characterLocksCount} character locks, ${forbiddenShortcutsCount} shortcuts, ${freedomCount} freedom allowances`;
+
+  return {
+    score,
+    level,
+    breakdown: {
+      hardConstraintsCount,
+      characterLocksCount,
+      unknownBoundariesCount,
+      forbiddenShortcutsCount,
+      freedomCount,
+    },
+    details,
+  };
+}
+
+export interface ContractIssue {
+  readonly path: string;
+  readonly message: string;
+  readonly code: string;
+}
+
+export interface ContractValidationResult {
+  readonly ok: boolean;
+  readonly errors: ReadonlyArray<ContractIssue>;
+  readonly warnings: ReadonlyArray<ContractIssue>;
+  readonly constraintPressure: ConstraintPressure;
+  readonly estimatedTokens: number;
+}
+
+/**
+ * Validates contract semantics, provenance boundaries, token budget, and produces constraint pressure metrics.
+ */
+export function validateCreativeContractSemantics(
+  contract: ChapterCreativeContract,
+  bundle?: PlanningEvidenceBundle,
+  options?: {
+    readonly maxTokens?: number;
+    readonly memoGoal?: string;
+  },
+): ContractValidationResult {
+  const errors: ContractIssue[] = [];
+  const warnings: ContractIssue[] = [];
+
+  const maxTokens = options?.maxTokens ?? DEFAULT_MAX_CONTRACT_TOKENS;
+  const estimatedTokens = estimateContractTokens(contract);
+
+  // 1. Token Budget Check
+  if (estimatedTokens > maxTokens) {
+    errors.push({
+      path: "global.tokens",
+      message: `Contract estimated token count (${estimatedTokens}) exceeds maximum budget (${maxTokens})`,
+      code: "CONTRACT_TOKEN_BUDGET_EXCEEDED",
+    });
+  }
+
+  // 2. Constraint Pressure & Freedom Balance
+  const constraintPressure = computeConstraintPressure(contract);
+  if (constraintPressure.level === "high") {
+    warnings.push({
+      path: "global.pressure",
+      message: `High constraint pressure (${constraintPressure.score}/100). The contract may excessively restrict writer creative latitude.`,
+      code: "HIGH_CONSTRAINT_PRESSURE",
+    });
+  }
+
+  if (contract.hardConstraints.length >= 10) {
+    warnings.push({
+      path: "hardConstraints",
+      message: `Hard constraints count is near maximum (${contract.hardConstraints.length}/12).`,
+      code: "HARD_CONSTRAINTS_NEAR_CAPACITY",
+    });
+  }
+
+  if (contract.freedomZone.mayInvent.length === 0 && contract.freedomZone.mayVary.length === 0) {
+    warnings.push({
+      path: "freedomZone",
+      message: "Freedom zone provides no explicit invent or vary allowances; writer creative agency is constrained.",
+      code: "EMPTY_FREEDOM_ZONE",
+    });
+  }
+
+  // 3. Cheap Structural Heuristic for Intent Laziness
+  if (options?.memoGoal) {
+    const trimmedMemoGoal = options.memoGoal.trim();
+    const trimmedWhy = contract.whyThisChapterExists.statement.trim();
+    const trimmedHumanCore = contract.humanCore.statement.trim();
+
+    if (trimmedMemoGoal === trimmedWhy) {
+      errors.push({
+        path: "whyThisChapterExists.statement",
+        message: "whyThisChapterExists must not be an identical copy of memo.goal (cheap structural heuristic).",
+        code: "LAZY_COPY_MEMO_GOAL",
+      });
+    }
+    if (trimmedWhy === trimmedHumanCore) {
+      errors.push({
+        path: "humanCore.statement",
+        message: "humanCore must not be an identical copy of whyThisChapterExists (cheap structural heuristic).",
+        code: "LAZY_COPY_HUMAN_CORE",
+      });
+    }
+  }
+
+  // 4. Evidence Provenance & Canon Boundaries
+  if (bundle) {
+    // Validate hard constraints sourceRef and canon authority
+    for (let i = 0; i < contract.hardConstraints.length; i++) {
+      const hc = contract.hardConstraints[i];
+      if (hc.source === "canon") {
+        if (!hc.sourceRef) {
+          errors.push({
+            path: `hardConstraints[${i}].sourceRef`,
+            message: `Hard constraint "${hc.id}" claims source "canon" but provides no sourceRef provenance.`,
+            code: "MISSING_CANON_SOURCEREF",
+          });
+        } else {
+          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
+          if (!evidence) {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}" not in PlanningEvidenceBundle.`,
+              code: "UNVERIFIED_EVIDENCE_REFERENCE",
+            });
+          } else if (evidence.authority === "outline") {
+            // Outline intentions are future hopes, NOT established canon reality!
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" attempts to treat outline intention "${hc.sourceRef}" as canon reality. Outline is not established canon.`,
+              code: "OUTLINE_CANON_CONFUSION",
+            });
+          }
+        }
+      }
+    }
+
+    // Validate characters belong to known characterIds
+    const knownChars = new Set(bundle.characterIds);
+    for (let i = 0; i < contract.humanCore.anchoredInCharacters.length; i++) {
+      const char = contract.humanCore.anchoredInCharacters[i];
+      if (!knownChars.has(char)) {
+        errors.push({
+          path: `humanCore.anchoredInCharacters[${i}]`,
+          message: `Anchored character "${char}" is not registered in PlanningEvidenceBundle characterIds.`,
+          code: "UNKNOWN_CHARACTER_ID",
+        });
+      }
+    }
+
+    for (let i = 0; i < contract.characterConstraints.length; i++) {
+      const cc = contract.characterConstraints[i];
+      if (!knownChars.has(cc.characterId)) {
+        errors.push({
+          path: `characterConstraints[${i}].characterId`,
+          message: `Constrained character "${cc.characterId}" is not registered in PlanningEvidenceBundle characterIds.`,
+          code: "UNKNOWN_CHARACTER_ID",
+        });
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    constraintPressure,
+    estimatedTokens,
+  };
+}

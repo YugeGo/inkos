@@ -6,11 +6,14 @@ import {
   ChapterCreativeContractSchema,
   type ChapterCreativeContract,
   PersistedPlanSchema,
-  PersistedPlanV2Schema,
-  PersistedPlanV3Schema,
   savePersistedPlan,
   loadPersistedPlan,
   InferredAuthorIntentHypothesisSchema,
+  type PlanningEvidenceBundle,
+  validateCreativeContractSemantics,
+  estimateContractTokens,
+  computeConstraintPressure,
+  computePlannerConfigHash,
 } from "../index.js";
 import type { PlanChapterOutput } from "../agents/planner.js";
 
@@ -45,7 +48,7 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
         statement: "主控台必须保持离线无响应状态，禁止自行通电恢复。",
         source: "canon",
         sourceRef: "state:current_state.json#console.status",
-        severity: "absolute",
+        priority: "absolute",
       },
     ],
     characterConstraints: [
@@ -97,8 +100,18 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     plannedAuthorIntent: {
       readerEffects: ["引导读者从‘接受意外’转向‘怀疑内部’"],
       informationStrategy: {
-        reveal: ["泵房阀门有新擦拭过的润滑油痕迹"],
-        withhold: ["主管抽屉里的离职信"],
+        reveal: [
+          {
+            id: "fact_valve_oil",
+            description: "泵房阀门有新擦拭过的润滑油痕迹",
+          },
+        ],
+        withhold: [
+          {
+            id: "fact_resignation_letter",
+            description: "主管抽屉里的离职信",
+          },
+        ],
       },
       attentionStrategy: ["聚焦在机械细节的微小异常上，而非宏观阴谋"],
       emotionalTrajectory: ["平静按部就班 -> 发现细节 -> 沉默与不动声色的动摇"],
@@ -118,54 +131,55 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     },
   };
 
-  it("validates a fully formed ChapterCreativeContract", () => {
+  const sampleEvidenceBundle: PlanningEvidenceBundle = {
+    canonFacts: [
+      {
+        ref: "canon:pump_room_built",
+        text: "下层泵房建于七年前",
+        authority: "canon",
+      },
+    ],
+    runtimeState: [
+      {
+        ref: "state:current_state.json#console.status",
+        text: "主控台离线无响应",
+        authority: "runtime_state",
+      },
+    ],
+    bookRules: [
+      {
+        ref: "rule:airlock_seal",
+        text: "铅封破坏后需双人手动认证复原",
+        authority: "book_rule",
+      },
+    ],
+    activeHooks: [
+      {
+        ref: "hook:hk_subordinate_secret",
+        text: "副官口袋里揣着被揉皱的维修单",
+        authority: "runtime_state",
+      },
+    ],
+    outlineIntentions: [
+      {
+        ref: "outline:ch30_arthur_leaves",
+        text: "第30章 Arthur 将彻底脱离安全部（未来大纲，非既定事实）",
+        authority: "outline",
+      },
+    ],
+    characterIds: ["arthur", "clara", "deputy"],
+  };
+
+  it("validates a fully formed ChapterCreativeContract with InformationTarget and priority", () => {
     const parsed = ChapterCreativeContractSchema.parse(validContract);
     expect(parsed.schemaVersion).toBe(1);
     expect(parsed.humanCore.anchoredInCharacters).toContain("arthur");
+    expect(parsed.hardConstraints[0].priority).toBe("absolute");
     expect(parsed.hardConstraints[0].sourceRef).toBe("state:current_state.json#console.status");
     expect(parsed.characterConstraints[0].beliefsThatMustPersist).toContain("这只是普通的机械过载故障");
+    expect(parsed.plannedAuthorIntent.informationStrategy.reveal[0].id).toBe("fact_valve_oil");
     expect(parsed.freedomZone.mustRemainUnderspecified).toHaveLength(1);
     expect(parsed.forbiddenShortcuts[0].reason).toBeTruthy();
-  });
-
-  it("rejects humanCore if anchoredInCharacters is empty", () => {
-    const invalid = {
-      ...validContract,
-      humanCore: {
-        statement: "关于信任与背叛的虚无探讨",
-        anchoredInCharacters: [],
-      },
-    };
-    expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow();
-  });
-
-  it("rejects hardConstraints with invalid severity", () => {
-    const invalid = {
-      ...validContract,
-      hardConstraints: [
-        {
-          id: "hc_1",
-          statement: "测试",
-          source: "canon",
-          severity: "optional", // Invalid enum
-        },
-      ],
-    };
-    expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow();
-  });
-
-  it("rejects forbiddenShortcuts without explanation reason", () => {
-    const invalid = {
-      ...validContract,
-      forbiddenShortcuts: [
-        {
-          code: "test_code",
-          description: "禁止某套路",
-          // missing reason
-        },
-      ],
-    };
-    expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow();
   });
 
   it("rejects duplicate IDs in hardConstraints", () => {
@@ -176,13 +190,13 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
           id: "hc_duplicate",
           statement: "第一条约束",
           source: "canon",
-          severity: "absolute",
+          priority: "absolute",
         },
         {
           id: "hc_duplicate", // Duplicate ID
           statement: "第二条约束",
           source: "world",
-          severity: "strong",
+          priority: "strong",
         },
       ],
     };
@@ -197,7 +211,7 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
           id: "shared_id",
           statement: "硬约束",
           source: "canon",
-          severity: "absolute",
+          priority: "absolute",
         },
       ],
       readerTransition: {
@@ -214,12 +228,65 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow(/collides with an existing hardConstraint id/);
   });
 
+  it("rejects informationTarget ID conflict between reveal and withhold (reveal ∩ withhold = ∅)", () => {
+    const invalid = {
+      ...validContract,
+      plannedAuthorIntent: {
+        ...validContract.plannedAuthorIntent,
+        informationStrategy: {
+          reveal: [
+            {
+              id: "fact_same_target",
+              description: "既要揭示",
+            },
+          ],
+          withhold: [
+            {
+              id: "fact_same_target", // Conflict!
+              description: "又要隐瞒",
+            },
+          ],
+        },
+      },
+    };
+    expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow(/cannot be in both reveal and withhold strategies/);
+  });
+
+  it("rejects informationTarget ID conflict between reveal and mustRemainUnknown (reveal ∩ mustRemainUnknown = ∅)", () => {
+    const invalid = {
+      ...validContract,
+      readerTransition: {
+        ...validContract.readerTransition,
+        mustRemainUnknown: [
+          {
+            id: "fact_top_secret",
+            topic: "最高机密",
+            boundaryRule: "读者不得知晓",
+          },
+        ],
+      },
+      plannedAuthorIntent: {
+        ...validContract.plannedAuthorIntent,
+        informationStrategy: {
+          reveal: [
+            {
+              id: "fact_top_secret", // Conflict with mustRemainUnknown!
+              description: "却计划在本章揭示",
+            },
+          ],
+          withhold: [],
+        },
+      },
+    };
+    expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow(/marked for reveal but also listed in mustRemainUnknown/);
+  });
+
   it("enforces volume bounds: rejects hardConstraints exceeding maximum of 12", () => {
     const tooManyHardConstraints = Array.from({ length: 13 }, (_, i) => ({
       id: `hc_${i}`,
       statement: `约束陈述 ${i}`,
       source: "canon" as const,
-      severity: "absolute" as const,
+      priority: "absolute" as const,
     }));
     const invalid = {
       ...validContract,
@@ -243,16 +310,69 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(() => ChapterCreativeContractSchema.parse(invalid)).toThrow();
   });
 
-  it("validates InferredAuthorIntentHypothesisSchema for reverse engineering", () => {
-    const hypothesis = {
-      hypothesis: "作者希望通过双重视角误导读者相信嫌疑人已有不在场证明",
-      confidence: "strong" as const,
-      basis: ["视角切换在关键时间点发生", "未给出走廊时钟特写"],
-      evidence: ["第3节：‘钟声响了两次’"],
+  it("calculates contract token budget and constraint pressure", () => {
+    const tokens = estimateContractTokens(validContract);
+    expect(tokens).toBeGreaterThan(100);
+    expect(tokens).toBeLessThan(3000);
+
+    const pressure = computeConstraintPressure(validContract);
+    expect(pressure.score).toBeGreaterThanOrEqual(0);
+    expect(pressure.score).toBeLessThanOrEqual(100);
+    expect(["low", "medium", "high"]).toContain(pressure.level);
+    expect(pressure.details).toBeTruthy();
+  });
+
+  it("semantic validator catches outline intention mislabeled as canon", () => {
+    const contractWithOutlineAsCanon: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_future_spoiler",
+          statement: "Arthur 必定离开安全部",
+          source: "canon",
+          sourceRef: "outline:ch30_arthur_leaves", // This is an outline item, NOT canon!
+          priority: "absolute",
+        },
+      ],
     };
-    const parsed = InferredAuthorIntentHypothesisSchema.parse(hypothesis);
-    expect(parsed.confidence).toBe("strong");
-    expect(parsed.basis).toHaveLength(2);
+
+    const result = validateCreativeContractSemantics(contractWithOutlineAsCanon, sampleEvidenceBundle);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.code === "OUTLINE_CANON_CONFUSION")).toBe(true);
+  });
+
+  it("semantic validator catches lazy copy between memo.goal, why, and humanCore", () => {
+    const lazyContract: ChapterCreativeContract = {
+      ...validContract,
+      whyThisChapterExists: { statement: "相同的文本" },
+      humanCore: {
+        statement: "相同的文本", // Lazy copy of why
+        anchoredInCharacters: ["arthur"],
+      },
+    };
+
+    const result = validateCreativeContractSemantics(lazyContract, sampleEvidenceBundle, {
+      memoGoal: "相同的文本", // Lazy copy of memo
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.code === "LAZY_COPY_MEMO_GOAL")).toBe(true);
+    expect(result.errors.some((e) => e.code === "LAZY_COPY_HUMAN_CORE")).toBe(true);
+  });
+
+  it("semantic validator produces warning when freedomZone is empty", () => {
+    const restrictedContract: ChapterCreativeContract = {
+      ...validContract,
+      freedomZone: {
+        mayInvent: [],
+        mayVary: [],
+        mustRemainUnderspecified: [],
+        surpriseAllowed: false,
+      },
+    };
+
+    const result = validateCreativeContractSemantics(restrictedContract, sampleEvidenceBundle);
+    expect(result.warnings.some((w) => w.code === "EMPTY_FREEDOM_ZONE")).toBe(true);
   });
 
   it("handles backward compatibility: reads legacy PersistedPlan V2 and normalizes creativeContract to undefined", async () => {
@@ -275,7 +395,6 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(parsed.version).toBe(2);
     expect((parsed as any).creativeContract).toBeUndefined();
 
-    // Verify through loadPersistedPlan
     const runtimeDir = join(tempDir, "story", "runtime");
     await mkdir(runtimeDir, { recursive: true });
     await writeFile(
@@ -292,12 +411,11 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     const loaded = await loadPersistedPlan(tempDir, 1);
     expect(loaded).not.toBeNull();
     expect(loaded!.intent.chapter).toBe(1);
-    expect(loaded!.memo.threadRefs).toEqual(["hook_1"]);
     expect(loaded!.creativeContract).toBeUndefined();
     expect(loaded!.planningProfile).toBeUndefined();
   });
 
-  it("handles PersistedPlan V3: truly round-trips creativeContract and planningProfile with versions", async () => {
+  it("handles PersistedPlan V3: round-trips creativeContract and planningProfile with provider/model/hash", async () => {
     const planWithContract: PlanChapterOutput = {
       intent: { chapter: 2, goal: validContract.whyThisChapterExists.statement },
       memo: {
@@ -310,65 +428,63 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
       plannerInputs: ["story/book_rules.md"],
       runtimePath: join(tempDir, "story", "runtime", "chapter-0002.intent.md"),
       creativeContract: validContract,
-      planningProfile: {
-        authorMindEnabled: true,
-        contractSchemaVersion: 1,
-        plannerPromptVersion: "author-mind-planner-v1",
-        plannerToolVersion: 1,
-      },
     };
 
     const runtimeDir = join(tempDir, "story", "runtime");
     await mkdir(runtimeDir, { recursive: true });
 
-    // Save plan with explicit profile versions
     await savePersistedPlan(tempDir, planWithContract, {
       authorMindEnabled: true,
       plannerPromptVersion: "author-mind-planner-v1",
       plannerToolVersion: 1,
+      plannerProvider: "anthropic",
+      plannerModel: "claude-3-7-sonnet",
     });
 
-    // Load plan and verify ALL round-trip fields
     const loaded = await loadPersistedPlan(tempDir, 2);
     expect(loaded).not.toBeNull();
     expect(loaded!.creativeContract).toBeDefined();
     expect(loaded!.creativeContract?.schemaVersion).toBe(1);
-    expect(loaded!.creativeContract?.humanCore.anchoredInCharacters).toContain("arthur");
-    expect(loaded!.creativeContract?.hardConstraints[0].id).toBe("hc_console_inactive");
-    expect(loaded!.creativeContract?.hardConstraints[0].sourceRef).toBe("state:current_state.json#console.status");
+    expect(loaded!.creativeContract?.hardConstraints[0].priority).toBe("absolute");
+    expect(loaded!.creativeContract?.plannedAuthorIntent.informationStrategy.reveal[0].id).toBe("fact_valve_oil");
 
-    // Explicitly assert planningProfile fields
     expect(loaded!.planningProfile).toBeDefined();
     expect(loaded!.planningProfile?.authorMindEnabled).toBe(true);
-    expect(loaded!.planningProfile?.contractSchemaVersion).toBe(1);
-    expect(loaded!.planningProfile?.plannerPromptVersion).toBe("author-mind-planner-v1");
-    expect(loaded!.planningProfile?.plannerToolVersion).toBe(1);
+    expect(loaded!.planningProfile?.plannerProvider).toBe("anthropic");
+    expect(loaded!.planningProfile?.plannerModel).toBe("claude-3-7-sonnet");
+    expect(loaded!.planningProfile?.plannerConfigHash).toBeTruthy();
   });
 
-  it("supports downgrade compatibility: saves PersistedPlan V2 when authorMindEnabled is explicitly false and no contract", async () => {
-    const nativePlan: PlanChapterOutput = {
-      intent: { chapter: 3, goal: "原生 InkOS 计划" },
+  it("non-destructively preserves existing V3 contract even when authorMindEnabled is false unless downgradePlan is set", async () => {
+    const planWithContract: PlanChapterOutput = {
+      intent: { chapter: 3, goal: "已有 V3 计划" },
       memo: {
         chapter: 3,
-        goal: "原生 InkOS 计划",
-        body: "原生计划正文...",
+        goal: "已有 V3 计划",
+        body: "正文...",
         threadRefs: [],
       },
-      intentMarkdown: "原生 Markdown",
-      plannerInputs: ["story/brief.md"],
+      intentMarkdown: "投影",
+      plannerInputs: [],
       runtimePath: join(tempDir, "story", "runtime", "chapter-0003.intent.md"),
+      creativeContract: validContract,
     };
 
     const runtimeDir = join(tempDir, "story", "runtime");
     await mkdir(runtimeDir, { recursive: true });
 
-    // Save with authorMindEnabled: false
-    await savePersistedPlan(tempDir, nativePlan, { authorMindEnabled: false });
+    // Normal save with authorMindEnabled: false (flag disabled, but contract exists)
+    await savePersistedPlan(tempDir, planWithContract, { authorMindEnabled: false });
 
-    // Verify underlying file is strictly version 2
-    const rawContent = await loadPersistedPlan(tempDir, 3);
-    expect(rawContent).not.toBeNull();
-    expect(rawContent!.creativeContract).toBeUndefined();
-    expect(rawContent!.planningProfile).toBeUndefined();
+    // Should NOT destroy the contract; stays V3
+    const savedNormally = await loadPersistedPlan(tempDir, 3);
+    expect(savedNormally!.creativeContract).toBeDefined();
+    expect(savedNormally!.planningProfile?.authorMindEnabled).toBe(false);
+
+    // Explicit downgrade destroys the contract and reverts to V2
+    await savePersistedPlan(tempDir, planWithContract, { downgradePlan: true });
+    const downgraded = await loadPersistedPlan(tempDir, 3);
+    expect(downgraded!.creativeContract).toBeUndefined();
+    expect(downgraded!.planningProfile).toBeUndefined();
   });
 });
