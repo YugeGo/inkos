@@ -58,6 +58,22 @@ export function isTransportOnlyContextSource(
   return input.consumption === "transport" || input.source === CREATIVE_CONTRACT_CONTEXT_SOURCE;
 }
 
+export function isConsumerContextSource(
+  input: ContextPackage["selectedContext"][number],
+  consumer?: import("../models/input-governance.js").ContextAudience,
+): boolean {
+  if (isTransportOnlyContextSource(input)) {
+    return false;
+  }
+  if (input.audience !== undefined) {
+    if (!consumer) {
+      return false;
+    }
+    return input.audience.includes(consumer);
+  }
+  return true;
+}
+
 function sumContextTokens(entries: ReadonlyArray<ContextPackage["selectedContext"][number]>): number {
   return entries.reduce((total, entry) => total + estimateContextSourceTokens(entry), 0);
 }

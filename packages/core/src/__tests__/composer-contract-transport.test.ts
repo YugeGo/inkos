@@ -309,7 +309,7 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
     });
 
     const budget: ContextBudget = {
-      contextWindowTokens: 2500,
+      contextWindowTokens: 3500,
       reservedOutputTokens: 500,
     };
 

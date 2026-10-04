@@ -1,10 +1,11 @@
-import type { ChapterCreativeContract } from "../models/creative-contract.js";
+import { createHash } from "node:crypto";
+import type { ChapterCreativeContract, ReaderState } from "../models/creative-contract.js";
 import type {
   CompiledCreativeDirectives,
   CompiledDirective,
-  CompiledNegativeSpaceItem,
   CompiledSoftGuidance,
   CompiledFreedomZone,
+  CompiledReaderState,
 } from "../models/compiled-directives.js";
 import { CompiledCreativeDirectivesSchema } from "../models/compiled-directives.js";
 import type { ContextPackage } from "../models/input-governance.js";
@@ -16,15 +17,35 @@ export interface CompileCreativeContractOptions {
   readonly chapterNumber?: number;
 }
 
+function shortHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 6);
+}
+
+function compileReaderState(state: ReaderState): CompiledReaderState {
+  return {
+    knows: [...state.knows],
+    believes: state.believes.map((b) => ({ proposition: b.proposition, strength: b.strength })),
+    suspects: state.suspects.map((s) => ({ proposition: s.proposition, strength: s.strength })),
+    expects: state.expects.map((e) => ({ proposition: e.proposition, strength: e.strength })),
+    questions: state.questions.map((q) => ({
+      question: q.question,
+      ...(q.salience ? { salience: q.salience } : {}),
+    })),
+    emotionalPosition: [...state.emotionalPosition],
+  };
+}
+
 /**
  * Deterministic Host Contract Compiler (zero LLM calls).
  * Compiles canonical ChapterCreativeContract into a structured CompiledCreativeDirectives
  * hierarchy organized by rule precedence:
  * - L0 ABSOLUTE: Absolute hardConstraints, readerTransition.mustRemainUnknown (information boundaries),
- *   characterConstraints.mustNotKnow (cognitive boundaries), forbiddenShortcuts.
+ *   characterConstraints.mustNotKnow (cognitive boundaries), forbiddenShortcuts,
+ *   AND freedomZone.mustRemainUnderspecified (negative-space fence guardrails).
  * - L1 STRONG: Strong hardConstraints, behavioralLimits, beliefsThatMustPersist, beliefsAtStart.
- * - L2 SOFT: whyThisChapterExists, humanCore, readerTransition.desiredAfter, plannedAuthorIntent.
- * - L3 FREEDOM: mayInvent, mayVary, mustRemainUnderspecified (with negative-space protection), surpriseAllowed.
+ * - L2 SOFT: whyThisChapterExists, humanCore, readerTransition (Before -> After complete cognitive model),
+ *   plannedAuthorIntent.
+ * - L3 FREEDOM: mayInvent, mayVary, surpriseAllowed (unscripted local creativity without twist bias).
  */
 export function compileCreativeContract(
   contract: ChapterCreativeContract,
@@ -33,7 +54,7 @@ export function compileCreativeContract(
   const language = options?.language ?? "zh";
   const isZh = language !== "en";
 
-  // 1. Compile L0 Absolute Directives
+  // 1. Compile L0 Absolute Directives (Hard Constraints + Secrets + Cognitive + Shortcuts + Negative Space)
   const absoluteDirectives: CompiledDirective[] = [];
 
   // L0: Hard Constraints (priority: absolute)
@@ -73,11 +94,11 @@ export function compileCreativeContract(
     });
   }
 
-  // L0: Character Cognitive Boundaries (mustNotKnow)
+  // L0: Character Cognitive Boundaries (mustNotKnow) - Content-derived stable IDs
   for (const char of contract.characterConstraints) {
     const list = char.mustNotKnow ?? [];
-    list.forEach((rule, idx) => {
-      const id = `${char.characterId}-mustNotKnow-${idx + 1}`;
+    list.forEach((rule) => {
+      const id = `char_${char.characterId}_mustnot_${shortHash(rule)}`;
       absoluteDirectives.push({
         id,
         statement: isZh
@@ -114,6 +135,25 @@ export function compileCreativeContract(
     });
   }
 
+  // L0: Negative-Space Guardrails (mustRemainUnderspecified)
+  // Negative space is an absolute fence guardrail: models are strictly prohibited from collapsing ambiguities.
+  for (const item of contract.freedomZone.mustRemainUnderspecified) {
+    const id = `neg_space_${shortHash(item)}`;
+    absoluteDirectives.push({
+      id,
+      statement: isZh
+        ? `【留白边界】严禁坐实、过早揭秘或过度解释：“${item}”。叙事正文必须保持其未决张力与模糊负空间，不得在正文中机械补全背景或给出定论。`
+        : `[Negative-Space Boundary] DO NOT explain, reveal, or resolve: "${item}". Must remain underspecified and ambiguous; do not collapse this negative space.`,
+      authorityLevel: "L0_ABSOLUTE",
+      category: "negative_space",
+      sourceContractField: "freedomZone.mustRemainUnderspecified",
+      sourceId: id,
+      metadata: {
+        topic: item,
+      },
+    });
+  }
+
   // 2. Compile L1 Strong Directives
   const strongDirectives: CompiledDirective[] = [];
 
@@ -136,11 +176,11 @@ export function compileCreativeContract(
     }
   }
 
-  // L1: Character Behavioral Limits
+  // L1: Character Behavioral Limits - Content-derived stable IDs
   for (const char of contract.characterConstraints) {
     const list = char.behavioralLimits ?? [];
-    list.forEach((rule, idx) => {
-      const id = `${char.characterId}-behavioralLimit-${idx + 1}`;
+    list.forEach((rule) => {
+      const id = `char_${char.characterId}_limit_${shortHash(rule)}`;
       strongDirectives.push({
         id,
         statement: isZh
@@ -159,11 +199,11 @@ export function compileCreativeContract(
     });
   }
 
-  // L1: Character Persistent Beliefs (beliefsThatMustPersist)
+  // L1: Character Persistent Beliefs (beliefsThatMustPersist) - Content-derived stable IDs
   for (const char of contract.characterConstraints) {
     const list = char.beliefsThatMustPersist ?? [];
-    list.forEach((rule, idx) => {
-      const id = `${char.characterId}-persistBelief-${idx + 1}`;
+    list.forEach((rule) => {
+      const id = `char_${char.characterId}_persist_${shortHash(rule)}`;
       strongDirectives.push({
         id,
         statement: isZh
@@ -183,11 +223,11 @@ export function compileCreativeContract(
     });
   }
 
-  // L1: Character Initial Beliefs (beliefsAtStart)
+  // L1: Character Initial Beliefs (beliefsAtStart) - Content-derived stable IDs
   for (const char of contract.characterConstraints) {
     const list = char.beliefsAtStart ?? [];
-    list.forEach((rule, idx) => {
-      const id = `${char.characterId}-startBelief-${idx + 1}`;
+    list.forEach((rule) => {
+      const id = `char_${char.characterId}_start_${shortHash(rule)}`;
       strongDirectives.push({
         id,
         statement: isZh
@@ -207,7 +247,7 @@ export function compileCreativeContract(
     });
   }
 
-  // 3. Compile L2 Soft Guidance
+  // 3. Compile L2 Soft Guidance (Complete Reader Transition: Before -> After)
   const softGuidance: CompiledSoftGuidance = {
     whyThisChapterExists: contract.whyThisChapterExists.statement,
     humanCore: {
@@ -224,16 +264,10 @@ export function compileCreativeContract(
         }
       : {}),
     readerTransition: {
-      desiredKnows: [...contract.readerTransition.desiredAfter.knows],
-      desiredBeliefs: contract.readerTransition.desiredAfter.believes.map((b) => ({
-        proposition: b.proposition,
-        strength: b.strength,
-      })),
-      desiredQuestions: contract.readerTransition.desiredAfter.questions.map((q) => ({
-        question: q.question,
-        ...(q.salience ? { salience: q.salience } : {}),
-      })),
-      desiredEmotions: [...contract.readerTransition.desiredAfter.emotionalPosition],
+      ...(contract.readerTransition.inputState
+        ? { inputState: compileReaderState(contract.readerTransition.inputState) }
+        : {}),
+      desiredAfter: compileReaderState(contract.readerTransition.desiredAfter),
     },
     plannedAuthorIntent: {
       readerEffects: [...contract.plannedAuthorIntent.readerEffects],
@@ -250,21 +284,12 @@ export function compileCreativeContract(
     },
   };
 
-  // 4. Compile L3 Freedom Zone & Negative-Space Protection
-  const negativeSpaceGuarantees: CompiledNegativeSpaceItem[] =
-    contract.freedomZone.mustRemainUnderspecified.map((item) => ({
-      topic: item,
-      directive: isZh
-        ? `【留白保护】严禁坐实或过度解释：“${item}”。必须保持其模糊性与未决张力，不得在正文中机械补全背景或给出定论。`
-        : `[Negative-Space Protection] DO NOT explain, reveal, or resolve: "${item}". Preserve its ambiguity and unresolved tension; do not collapse this negative space.`,
-      sourceContractField: "freedomZone.mustRemainUnderspecified" as const,
-    }));
-
+  // 4. Compile L3 Freedom Zone
   const freedomZone: CompiledFreedomZone = {
     mayInvent: [...contract.freedomZone.mayInvent],
     mayVary: [...contract.freedomZone.mayVary],
     surpriseAllowed: contract.freedomZone.surpriseAllowed,
-    negativeSpaceGuarantees,
+    underspecifiedTopics: [...contract.freedomZone.mustRemainUnderspecified],
   };
 
   const totalL0 = absoluteDirectives.length;
@@ -273,10 +298,12 @@ export function compileCreativeContract(
     1 + // whyThisChapterExists
     1 + // humanCore
     (contract.chapterFunction ? 1 : 0) +
-    softGuidance.readerTransition.desiredKnows.length +
-    softGuidance.readerTransition.desiredBeliefs.length +
-    softGuidance.readerTransition.desiredQuestions.length +
-    softGuidance.readerTransition.desiredEmotions.length +
+    softGuidance.readerTransition.desiredAfter.knows.length +
+    softGuidance.readerTransition.desiredAfter.believes.length +
+    softGuidance.readerTransition.desiredAfter.suspects.length +
+    softGuidance.readerTransition.desiredAfter.expects.length +
+    softGuidance.readerTransition.desiredAfter.questions.length +
+    softGuidance.readerTransition.desiredAfter.emotionalPosition.length +
     softGuidance.plannedAuthorIntent.readerEffects.length +
     softGuidance.plannedAuthorIntent.revealTargets.length +
     softGuidance.plannedAuthorIntent.withholdTargets.length +
@@ -285,7 +312,7 @@ export function compileCreativeContract(
   const totalL3 =
     freedomZone.mayInvent.length +
     freedomZone.mayVary.length +
-    freedomZone.negativeSpaceGuarantees.length +
+    freedomZone.underspecifiedTopics.length +
     1; // surpriseAllowed
 
   return CompiledCreativeDirectivesSchema.parse({
@@ -304,6 +331,33 @@ export function compileCreativeContract(
   });
 }
 
+function renderReaderStateBlock(state: CompiledReaderState, isZh: boolean): string[] {
+  const lines: string[] = [];
+  if (state.knows.length > 0) {
+    lines.push(`- **${isZh ? "获知事实 (Knows)" : "Known Facts (Knows)"}**：${state.knows.join(isZh ? "；" : "; ")}`);
+  }
+  if (state.believes.length > 0) {
+    const items = state.believes.map((b) => `${b.proposition} [${isZh ? `强度: ${b.strength}` : `strength: ${b.strength}`}]`);
+    lines.push(`- **${isZh ? "坚信观点 (Believes)" : "Beliefs (Believes)"}**：${items.join(isZh ? "；" : "; ")}`);
+  }
+  if (state.suspects.length > 0) {
+    const items = state.suspects.map((s) => `${s.proposition} [${isZh ? `强度: ${s.strength}` : `strength: ${s.strength}`}]`);
+    lines.push(`- **${isZh ? "怀疑猜想 (Suspects)" : "Suspicions (Suspects)"}**：${items.join(isZh ? "；" : "; ")}`);
+  }
+  if (state.expects.length > 0) {
+    const items = state.expects.map((e) => `${e.proposition} [${isZh ? `强度: ${e.strength}` : `strength: ${e.strength}`}]`);
+    lines.push(`- **${isZh ? "剧情预期 (Expects)" : "Expectations (Expects)"}**：${items.join(isZh ? "；" : "; ")}`);
+  }
+  if (state.questions.length > 0) {
+    const items = state.questions.map((q) => `${q.question}${q.salience ? ` [${isZh ? `显著度: ${q.salience}` : `salience: ${q.salience}`}]` : ""}`);
+    lines.push(`- **${isZh ? "激活疑问 (Questions)" : "Active Questions"}**：${items.join(isZh ? "；" : "; ")}`);
+  }
+  if (state.emotionalPosition.length > 0) {
+    lines.push(`- **${isZh ? "情绪落点 (Emotions)" : "Emotional Stance"}**：${state.emotionalPosition.join(isZh ? "；" : "; ")}`);
+  }
+  return lines;
+}
+
 /**
  * Renders CompiledCreativeDirectives into human-readable and narrative-consumable Markdown.
  */
@@ -314,11 +368,19 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
   const isZh = language !== "en";
   const lines: string[] = [];
 
+  const surpriseExplanation = isZh
+    ? (compiled.freedomZone.surpriseAllowed
+        ? "允许在既有边界内产生未预先指定的局部创意；这不是制造反转、冲突或悬念的要求。"
+        : "不得引入改变既定叙事方向的计划外重大惊奇；未被约束的实现细节仍保持自由。")
+    : (compiled.freedomZone.surpriseAllowed
+        ? "Permitted to introduce unscripted local creative elements within boundaries; this is not a directive to manufacture twists or shocks."
+        : "Do not introduce major unscripted surprises that derail the established trajectory; unconstrained execution details remain free.");
+
   if (isZh) {
     lines.push("# 本章创作合约指令 (Governing Creative Directives)");
     lines.push("");
     lines.push("> 本指令由作者心智合约确定性编译生成。");
-    lines.push("> 规则优先级：L0绝对铁律 > L1强力约束 > L2创作意图 > L3自由发挥与留白保护。");
+    lines.push("> 规则优先级：L0绝对铁律 > L1强力约束 > L2创作意图 > L3自由发挥。");
     lines.push("");
 
     // L0
@@ -328,7 +390,8 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     } else {
       for (const dir of compiled.absoluteDirectives) {
         const refPart = dir.sourceRef ? ` | 引用: ${dir.sourceRef}` : "";
-        lines.push(`- [${dir.id}] ${dir.statement} *(来源: ${dir.sourceContractField}${refPart})*`);
+        const icon = dir.category === "negative_space" ? "🔒 " : "";
+        lines.push(`- ${icon}[${dir.id}] ${dir.statement} *(来源: ${dir.sourceContractField}${refPart})*`);
       }
     }
     lines.push("");
@@ -359,25 +422,16 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     }
 
     lines.push("");
-    lines.push("### 读者认知体验目标 (Target Reader State)");
-    if (compiled.softGuidance.readerTransition.desiredKnows.length > 0) {
-      lines.push(`- **期望获知**：${compiled.softGuidance.readerTransition.desiredKnows.join("；")}`);
+    lines.push("### 读者认知转变设计 (Reader Cognitive Transition: Before -> After)");
+    if (compiled.softGuidance.readerTransition.inputState) {
+      lines.push("#### 开章前读者既有状态 (Reader State Before)");
+      lines.push(...renderReaderStateBlock(compiled.softGuidance.readerTransition.inputState, true));
+    } else {
+      lines.push("#### 开章前读者状态：*（未指定开章基线）*");
     }
-    if (compiled.softGuidance.readerTransition.desiredBeliefs.length > 0) {
-      const beliefs = compiled.softGuidance.readerTransition.desiredBeliefs
-        .map((b) => `${b.proposition} [强度: ${b.strength}]`)
-        .join("；");
-      lines.push(`- **期望坚信**：${beliefs}`);
-    }
-    if (compiled.softGuidance.readerTransition.desiredQuestions.length > 0) {
-      const questions = compiled.softGuidance.readerTransition.desiredQuestions
-        .map((q) => `${q.question}${q.salience ? ` [显著度: ${q.salience}]` : ""}`)
-        .join("；");
-      lines.push(`- **激活疑问**：${questions}`);
-    }
-    if (compiled.softGuidance.readerTransition.desiredEmotions.length > 0) {
-      lines.push(`- **情感落点**：${compiled.softGuidance.readerTransition.desiredEmotions.join("；")}`);
-    }
+    lines.push("");
+    lines.push("#### 本章后期望读者状态 (Desired Reader State After)");
+    lines.push(...renderReaderStateBlock(compiled.softGuidance.readerTransition.desiredAfter, true));
 
     lines.push("");
     lines.push("### 叙事信息与注意力策略 (Narrative Strategy)");
@@ -406,28 +460,12 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     lines.push("");
 
     // L3
-    lines.push("## L3 创作自由区与留白保护 (Artistic Freedom & Negative Space)");
-    if (compiled.freedomZone.mayInvent.length > 0) {
-      lines.push(`- **允许自由发挥**：${compiled.freedomZone.mayInvent.join("；")}`);
-    }
-    if (compiled.freedomZone.mayVary.length > 0) {
-      lines.push(`- **允许弹性变体**：${compiled.freedomZone.mayVary.join("；")}`);
-    }
-    lines.push(
-      `- **允许意外惊喜**：${compiled.freedomZone.surpriseAllowed ? "是 (允许合理的意外转折)" : "否 (严格按计划展开)"}`,
-    );
-
-    lines.push("");
-    lines.push("### 留白保护区 (严禁过度解释或过早坐实)");
-    lines.push(
-      "> 警告：以下元素属于受保护的负空间（留白）。叙事模型必须保持其未解之谜与悬念状态，严禁在正文中将其坐实、揭秘、或者机械补全背景！",
-    );
-    if (compiled.freedomZone.negativeSpaceGuarantees.length === 0) {
-      lines.push("- （本章无特殊留白保护项）");
-    } else {
-      for (const item of compiled.freedomZone.negativeSpaceGuarantees) {
-        lines.push(`- 🔒 ${item.directive}`);
-      }
+    lines.push("## L3 创作自由区 (Artistic Freedom)");
+    lines.push(`- **允许自由发挥 (May Invent)**：${compiled.freedomZone.mayInvent.join("；") || "（未指定）"}`);
+    lines.push(`- **允许弹性变体 (May Vary)**：${compiled.freedomZone.mayVary.join("；") || "（未指定）"}`);
+    lines.push(`- **局部创意自由度 (Surprise Allowed)**：${surpriseExplanation}`);
+    if (compiled.freedomZone.underspecifiedTopics.length > 0) {
+      lines.push(`- **受保护留白主题**：${compiled.freedomZone.underspecifiedTopics.map((t) => `“${t}” (已作为L0绝对铁律严格受保护)`).join("；")}`);
     }
   } else {
     // English
@@ -435,7 +473,7 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     lines.push("");
     lines.push("> Compiled deterministically from canonical Author-Mind creative contract.");
     lines.push(
-      "> Rule Precedence: L0 Absolute > L1 Strong > L2 Soft Intent > L3 Artistic Freedom & Negative-Space Protection.",
+      "> Rule Precedence: L0 Absolute > L1 Strong > L2 Soft Intent > L3 Artistic Freedom.",
     );
     lines.push("");
 
@@ -446,7 +484,8 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     } else {
       for (const dir of compiled.absoluteDirectives) {
         const refPart = dir.sourceRef ? ` | ref: ${dir.sourceRef}` : "";
-        lines.push(`- [${dir.id}] ${dir.statement} *(source: ${dir.sourceContractField}${refPart})*`);
+        const icon = dir.category === "negative_space" ? "🔒 " : "";
+        lines.push(`- ${icon}[${dir.id}] ${dir.statement} *(source: ${dir.sourceContractField}${refPart})*`);
       }
     }
     lines.push("");
@@ -477,25 +516,16 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     }
 
     lines.push("");
-    lines.push("### Target Reader State (Transitions)");
-    if (compiled.softGuidance.readerTransition.desiredKnows.length > 0) {
-      lines.push(`- **Target Knowledge (Knows)**: ${compiled.softGuidance.readerTransition.desiredKnows.join("; ")}`);
+    lines.push("### Reader Cognitive Transition (Before -> After)");
+    if (compiled.softGuidance.readerTransition.inputState) {
+      lines.push("#### Reader State Before Chapter (Input State)");
+      lines.push(...renderReaderStateBlock(compiled.softGuidance.readerTransition.inputState, false));
+    } else {
+      lines.push("#### Reader State Before Chapter: *(No baseline specified)*");
     }
-    if (compiled.softGuidance.readerTransition.desiredBeliefs.length > 0) {
-      const beliefs = compiled.softGuidance.readerTransition.desiredBeliefs
-        .map((b) => `${b.proposition} [strength: ${b.strength}]`)
-        .join("; ");
-      lines.push(`- **Target Beliefs (Believes)**: ${beliefs}`);
-    }
-    if (compiled.softGuidance.readerTransition.desiredQuestions.length > 0) {
-      const questions = compiled.softGuidance.readerTransition.desiredQuestions
-        .map((q) => `${q.question}${q.salience ? ` [salience: ${q.salience}]` : ""}`)
-        .join("; ");
-      lines.push(`- **Active Questions**: ${questions}`);
-    }
-    if (compiled.softGuidance.readerTransition.desiredEmotions.length > 0) {
-      lines.push(`- **Target Emotional Stance**: ${compiled.softGuidance.readerTransition.desiredEmotions.join("; ")}`);
-    }
+    lines.push("");
+    lines.push("#### Desired Reader State After Chapter (Target State)");
+    lines.push(...renderReaderStateBlock(compiled.softGuidance.readerTransition.desiredAfter, false));
 
     lines.push("");
     lines.push("### Information & Attention Strategy");
@@ -526,26 +556,12 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
     lines.push("");
 
     // L3
-    lines.push("## L3 Artistic Freedom & Negative-Space Protection");
-    if (compiled.freedomZone.mayInvent.length > 0) {
-      lines.push(`- **May Invent**: ${compiled.freedomZone.mayInvent.join("; ")}`);
-    }
-    if (compiled.freedomZone.mayVary.length > 0) {
-      lines.push(`- **May Vary**: ${compiled.freedomZone.mayVary.join("; ")}`);
-    }
-    lines.push(`- **Surprise Allowed**: ${compiled.freedomZone.surpriseAllowed ? "Yes" : "No"}`);
-
-    lines.push("");
-    lines.push("### Negative-Space Protection (Strict Guardrails Against Over-Explaining)");
-    lines.push(
-      "> WARNING: The following elements are deliberate negative space. The narrative writer MUST preserve their ambiguity and unresolved tension. DO NOT explain, resolve, or settle these elements in this chapter!",
-    );
-    if (compiled.freedomZone.negativeSpaceGuarantees.length === 0) {
-      lines.push("- (No specific negative-space items in this chapter)");
-    } else {
-      for (const item of compiled.freedomZone.negativeSpaceGuarantees) {
-        lines.push(`- 🔒 ${item.directive}`);
-      }
+    lines.push("## L3 Artistic Freedom");
+    lines.push(`- **May Invent**: ${compiled.freedomZone.mayInvent.join("; ") || "(none specified)"}`);
+    lines.push(`- **May Vary**: ${compiled.freedomZone.mayVary.join("; ") || "(none specified)"}`);
+    lines.push(`- **Local Creative Allowance (Surprise Allowed)**: ${surpriseExplanation}`);
+    if (compiled.freedomZone.underspecifiedTopics.length > 0) {
+      lines.push(`- **Protected Negative-Space Topics**: ${compiled.freedomZone.underspecifiedTopics.map((t) => `"${t}" (enforced under L0 Absolute Boundaries)`).join("; ")}`);
     }
   }
 
@@ -554,6 +570,7 @@ export function renderCompiledDirectivesAsNarrativeExcerpt(
 
 /**
  * Creates a protected, narrative-consumable ContextPackage entry for compiled creative directives.
+ * Explicitly scoped to audience: ["writer"], isolating Reviser, Auditor, and Settler.
  */
 export function createCompiledDirectivesContextEntry(
   compiled: CompiledCreativeDirectives,
@@ -568,6 +585,7 @@ export function createCompiledDirectivesContextEntry(
     excerpt: renderCompiledDirectivesAsNarrativeExcerpt(compiled, language),
     protection: "protected",
     consumption: "narrative",
+    audience: ["writer"],
   };
 }
 

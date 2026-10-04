@@ -58,7 +58,7 @@ export class ReviserAgent extends BaseAgent {
             : []),
         ].join("\n")).join("\n")
       : (isEnglish ? "- Follow the user's explicit revision instruction in the governed context." : "- 按 governed context 中的用户明确修订要求执行。");
-    const context = renderNarrativeSelectedContext(options.contextPackage.selectedContext, options.language);
+    const context = renderNarrativeSelectedContext(options.contextPackage.selectedContext, options.language, "reviser");
     const lengthBlock = options.lengthSpec
       ? (isEnglish
           ? `\n## Length contract\n${JSON.stringify({...options.lengthSpec,currentCount:countChapterLength(chapterContent,options.lengthSpec.countingMode),unit:"words"})}`

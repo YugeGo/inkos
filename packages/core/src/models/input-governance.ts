@@ -16,12 +16,16 @@ export const ChapterIntentSchema = z.object({
 
 export type ChapterIntent = z.infer<typeof ChapterIntentSchema>;
 
+export const ContextAudienceSchema = z.enum(["writer", "reviser", "auditor", "settler"]);
+export type ContextAudience = z.infer<typeof ContextAudienceSchema>;
+
 export const ContextSourceSchema = z.object({
   source: z.string().min(1),
   reason: z.string().min(1),
   excerpt: z.string().optional(),
   protection: z.enum(["protected", "compressible"]),
   consumption: z.enum(["narrative", "transport"]).optional(),
+  audience: z.array(ContextAudienceSchema).optional(),
 }).strict();
 
 export type ContextSource = z.infer<typeof ContextSourceSchema>;

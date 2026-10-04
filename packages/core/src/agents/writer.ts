@@ -21,7 +21,7 @@ import {
 } from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { renderMemoAsNarrativeBlock, renderNarrativeSelectedContext } from "../utils/narrative-control.js";
-import { isTransportOnlyContextSource, CREATIVE_CONTRACT_CONTEXT_SOURCE } from "../utils/context-assembly.js";
+import { isTransportOnlyContextSource, isConsumerContextSource, CREATIVE_CONTRACT_CONTEXT_SOURCE } from "../utils/context-assembly.js";
 import { COMPILED_DIRECTIVES_CONTEXT_SOURCE } from "../compiler/contract-compiler.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -467,7 +467,7 @@ export class WriterAgent extends BaseAgent {
     // buried among generic "evidence" entries where the model treats them as optional.
     const DIRECTION_SOURCES = new Set(["story/author_intent.md", "story/current_focus.md"]);
     const narrativeEntries = params.contextPackage.selectedContext.filter((entry) =>
-      !isTransportOnlyContextSource(entry),
+      isConsumerContextSource(entry, "writer"),
     );
     const directionEntries = narrativeEntries.filter((entry) =>
       DIRECTION_SOURCES.has(entry.source),
@@ -475,11 +475,11 @@ export class WriterAgent extends BaseAgent {
     const otherEntries = narrativeEntries.filter((entry) =>
       !DIRECTION_SOURCES.has(entry.source),
     );
-    const contextSections = renderNarrativeSelectedContext(otherEntries, language);
+    const contextSections = renderNarrativeSelectedContext(otherEntries, language, "writer");
     const userDirectionBlock = directionEntries.length > 0
       ? (language === "en"
-          ? `## User direction (overrides model defaults — must follow)\n${renderNarrativeSelectedContext(directionEntries, language)}\n`
-          : `## 用户方向（优先于模型默认，必须遵循）\n${renderNarrativeSelectedContext(directionEntries, language)}\n`)
+          ? `## User direction (overrides model defaults — must follow)\n${renderNarrativeSelectedContext(directionEntries, language, "writer")}\n`
+          : `## 用户方向（优先于模型默认，必须遵循）\n${renderNarrativeSelectedContext(directionEntries, language, "writer")}\n`)
       : "";
 
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
@@ -537,11 +537,11 @@ ${trimmed}
   ): string {
     const settlerSafeContext = contextPackage.selectedContext.filter(
       (entry) =>
+        isConsumerContextSource(entry, "settler") &&
         entry.source !== CREATIVE_CONTRACT_CONTEXT_SOURCE &&
-        entry.source !== COMPILED_DIRECTIVES_CONTEXT_SOURCE &&
-        entry.consumption !== "transport",
+        entry.source !== COMPILED_DIRECTIVES_CONTEXT_SOURCE,
     );
-    const selectedContext = renderNarrativeSelectedContext(settlerSafeContext, language)
+    const selectedContext = renderNarrativeSelectedContext(settlerSafeContext, language, "settler")
       .replace(/^### /gm, "- ");
 
     if (language === "en") {

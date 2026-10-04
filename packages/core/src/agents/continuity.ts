@@ -43,6 +43,7 @@ export class ContinuityAuditor extends BaseAgent {
     const governedContext = renderNarrativeSelectedContext(
       options.contextPackage.selectedContext,
       options.language,
+      "auditor",
     );
     const sources = new Map([["governed-context", governedContext], [`chapter-${chapterNumber}`, chapterContent]]);
     const primarySourceId=`chapter-${chapterNumber}`;

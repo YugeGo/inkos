@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -23,10 +23,11 @@ import {
   type ContextBudget,
 } from "../agents/composer.js";
 import { WriterAgent } from "../agents/writer.js";
+import { renderNarrativeSelectedContext } from "../utils/narrative-control.js";
 import { createInitialRuntimeState } from "../state/runtime-state-store.js";
 import type { PlanChapterOutput } from "../agents/planner.js";
 
-describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
+describe("Phase 3.5.1: Dynamic Contract Compiler & Semantic Closure", () => {
   let tempDir: string;
   let bookDir: string;
 
@@ -97,8 +98,8 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       inputState: {
         knows: ["老矿井三年前被封锁"],
         believes: [{ proposition: "矿井事故纯属天灾", strength: "strong" }],
-        suspects: [],
-        expects: [],
+        suspects: [{ proposition: "官方调查组掩盖了伤亡数字", strength: "moderate" }],
+        expects: [{ proposition: "进入矿井后能顺利找到排水口", strength: "strong" }],
         questions: [{ question: "为什么救援队当年没有深入底层？", salience: "high" }],
         emotionalPosition: ["谨慎怀疑"],
       },
@@ -199,15 +200,16 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(run1.chapterNumber).toBe(1);
     });
 
-    it("Correctly partitions L0 Absolute Directives with complete provenance", () => {
+    it("Correctly partitions L0 Absolute Directives with negative-space guardrails and content-hashed IDs", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "zh" });
 
       // L0 items:
       // 1. Absolute hard constraint (hc_cable_broken)
       // 2. Information boundary (sec_saboteur_identity)
-      // 3. Character cognitive boundary (arthur-mustNotKnow-1)
+      // 3. Character cognitive boundary (char_arthur_mustnot_...)
       // 4. Forbidden shortcut (no_magic_radio)
-      expect(compiled.absoluteDirectives).toHaveLength(4);
+      // 5-6. Negative-space boundaries (mustRemainUnderspecified x 2)
+      expect(compiled.absoluteDirectives).toHaveLength(6);
 
       const hc = compiled.absoluteDirectives.find((d) => d.id === "hc_cable_broken");
       expect(hc).toBeDefined();
@@ -222,10 +224,10 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(infoBoundary?.category).toBe("information_boundary");
       expect(infoBoundary?.sourceContractField).toBe("readerTransition.mustRemainUnknown");
 
-      const charCognitive = compiled.absoluteDirectives.find((d) => d.id === "arthur-mustNotKnow-1");
+      const charCognitive = compiled.absoluteDirectives.find((d) => d.category === "character_cognitive");
       expect(charCognitive).toBeDefined();
+      expect(charCognitive?.id).toMatch(/^char_arthur_mustnot_/);
       expect(charCognitive?.authorityLevel).toBe("L0_ABSOLUTE");
-      expect(charCognitive?.category).toBe("character_cognitive");
       expect(charCognitive?.characterId).toBe("arthur");
       expect(charCognitive?.statement).toContain("破坏铁索的人正是上一任领班");
 
@@ -234,16 +236,25 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(forbidden?.authorityLevel).toBe("L0_ABSOLUTE");
       expect(forbidden?.category).toBe("forbidden_shortcut");
       expect(forbidden?.statement).toContain("必须维持主角孤立无援的物理极限情境");
+
+      // Verify Negative-Space Boundaries are in L0 ABSOLUTE
+      const negSpace = compiled.absoluteDirectives.filter((d) => d.category === "negative_space");
+      expect(negSpace).toHaveLength(2);
+      expect(negSpace[0].authorityLevel).toBe("L0_ABSOLUTE");
+      expect(negSpace[0].sourceContractField).toBe("freedomZone.mustRemainUnderspecified");
+      expect(negSpace[0].id).toMatch(/^neg_space_/);
+      expect(negSpace[0].statement).toContain("【留白边界】严禁坐实、过早揭秘或过度解释");
+      expect(negSpace[0].statement).toContain("水银蒸馏管道具体由谁在出资运行");
     });
 
-    it("Correctly partitions L1 Strong Directives with complete provenance", () => {
+    it("Correctly partitions L1 Strong Directives with content-derived stable IDs", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "zh" });
 
       // L1 items:
       // 1. Strong hard constraint (hc_lantern_oil)
-      // 2. Character behavioral limit (arthur-behavioralLimit-1)
-      // 3. Character persistent belief (arthur-persistBelief-1)
-      // 4. Character start belief (arthur-startBelief-1)
+      // 2. Character behavioral limit (char_arthur_limit_...)
+      // 3. Character persistent belief (char_arthur_persist_...)
+      // 4. Character start belief (char_arthur_start_...)
       expect(compiled.strongDirectives).toHaveLength(4);
 
       const hcStrong = compiled.strongDirectives.find((d) => d.id === "hc_lantern_oil");
@@ -252,26 +263,26 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(hcStrong?.category).toBe("hard_constraint");
       expect(hcStrong?.sourceRef).toBe("state:current_state.json#lantern.oil");
 
-      const behavior = compiled.strongDirectives.find((d) => d.id === "arthur-behavioralLimit-1");
+      const behavior = compiled.strongDirectives.find((d) => d.category === "character_behavior");
       expect(behavior).toBeDefined();
+      expect(behavior?.id).toMatch(/^char_arthur_limit_/);
       expect(behavior?.authorityLevel).toBe("L1_STRONG");
-      expect(behavior?.category).toBe("character_behavior");
       expect(behavior?.characterId).toBe("arthur");
 
-      const persist = compiled.strongDirectives.find((d) => d.id === "arthur-persistBelief-1");
+      const persist = compiled.strongDirectives.find((d) => d.sourceContractField === "characterConstraints.beliefsThatMustPersist");
       expect(persist).toBeDefined();
+      expect(persist?.id).toMatch(/^char_arthur_persist_/);
       expect(persist?.authorityLevel).toBe("L1_STRONG");
-      expect(persist?.category).toBe("character_belief");
       expect(persist?.characterId).toBe("arthur");
 
-      const start = compiled.strongDirectives.find((d) => d.id === "arthur-startBelief-1");
+      const start = compiled.strongDirectives.find((d) => d.sourceContractField === "characterConstraints.beliefsAtStart");
       expect(start).toBeDefined();
+      expect(start?.id).toMatch(/^char_arthur_start_/);
       expect(start?.authorityLevel).toBe("L1_STRONG");
-      expect(start?.category).toBe("character_belief");
       expect(start?.characterId).toBe("arthur");
     });
 
-    it("Correctly structures L2 Soft Guidance (Purpose, Human Core, Transitions, Strategy)", () => {
+    it("Correctly structures L2 Soft Guidance preserving complete ReaderState Before -> After (including suspects and expects)", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "zh" });
 
       expect(compiled.softGuidance.whyThisChapterExists).toBe(sampleContract.whyThisChapterExists.statement);
@@ -279,15 +290,34 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(compiled.softGuidance.humanCore.anchoredInCharacters).toEqual(["arthur", "clara"]);
       expect(compiled.softGuidance.chapterFunction?.primary).toBe("揭开矿井深层污染真相并动摇主角核心信念");
 
-      expect(compiled.softGuidance.readerTransition.desiredKnows).toEqual([
+      // 1. Verify complete inputState (Before)
+      expect(compiled.softGuidance.readerTransition.inputState).toBeDefined();
+      expect(compiled.softGuidance.readerTransition.inputState?.knows).toEqual(["老矿井三年前被封锁"]);
+      expect(compiled.softGuidance.readerTransition.inputState?.believes[0].proposition).toBe("矿井事故纯属天灾");
+      expect(compiled.softGuidance.readerTransition.inputState?.suspects[0].proposition).toBe("官方调查组掩盖了伤亡数字");
+      expect(compiled.softGuidance.readerTransition.inputState?.expects[0].proposition).toBe("进入矿井后能顺利找到排水口");
+      expect(compiled.softGuidance.readerTransition.inputState?.questions[0].question).toBe("为什么救援队当年没有深入底层？");
+      expect(compiled.softGuidance.readerTransition.inputState?.emotionalPosition).toEqual(["谨慎怀疑"]);
+
+      // 2. Verify complete desiredAfter (After with suspects and expects)
+      expect(compiled.softGuidance.readerTransition.desiredAfter.knows).toEqual([
         "老矿井的封锁是为了掩盖地下水银泄漏",
       ]);
-      expect(compiled.softGuidance.readerTransition.desiredBeliefs[0].proposition).toBe(
+      expect(compiled.softGuidance.readerTransition.desiredAfter.believes[0].proposition).toBe(
         "官方调查报告存在系统性伪造",
       );
-      expect(compiled.softGuidance.readerTransition.desiredQuestions[0].question).toBe(
+      expect(compiled.softGuidance.readerTransition.desiredAfter.suspects[0].proposition).toBe(
+        "领班并非失踪而是被灭口",
+      );
+      expect(compiled.softGuidance.readerTransition.desiredAfter.expects[0].proposition).toBe(
+        "地下暗河存在未被标记的泄压阀",
+      );
+      expect(compiled.softGuidance.readerTransition.desiredAfter.questions[0].question).toBe(
         "谁在地下持续维护水银蒸馏管道？",
       );
+      expect(compiled.softGuidance.readerTransition.desiredAfter.emotionalPosition).toEqual([
+        "背脊发凉的惊悚感与不可遏制的求真冲动",
+      ]);
 
       expect(compiled.softGuidance.plannedAuthorIntent.revealTargets[0].id).toBe("target_mercury_leak");
       expect(compiled.softGuidance.plannedAuthorIntent.withholdTargets[0].id).toBe("target_saboteur_motive");
@@ -296,27 +326,19 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       ]);
     });
 
-    it("Correctly compiles L3 Freedom Zone with explicit Negative-Space Protection", () => {
+    it("Correctly compiles L3 Freedom Zone without railroad bias", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "zh" });
 
       expect(compiled.freedomZone.mayInvent).toEqual(sampleContract.freedomZone.mayInvent);
       expect(compiled.freedomZone.mayVary).toEqual(sampleContract.freedomZone.mayVary);
       expect(compiled.freedomZone.surpriseAllowed).toBe(true);
-
-      // Negative-Space Protection verification:
-      // mustRemainUnderspecified items must be transformed into negativeSpaceGuarantees
-      expect(compiled.freedomZone.negativeSpaceGuarantees).toHaveLength(2);
-      const item1 = compiled.freedomZone.negativeSpaceGuarantees[0];
-      expect(item1.topic).toBe("水银蒸馏管道具体由谁在出资运行");
-      expect(item1.directive).toContain("留白保护");
-      expect(item1.directive).toContain("严禁坐实或过度解释");
-      expect(item1.sourceContractField).toBe("freedomZone.mustRemainUnderspecified");
+      expect(compiled.freedomZone.underspecifiedTopics).toEqual(sampleContract.freedomZone.mustRemainUnderspecified);
     });
   });
 
   // 2. Rendering Tests
   describe("Narrative Excerpt Rendering", () => {
-    it("Renders rich Markdown in Chinese with clear precedence and negative space warnings", () => {
+    it("Renders rich Markdown in Chinese with L0 negative space and Before->After cognitive transition", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "zh" });
       const rendered = renderCompiledDirectivesAsNarrativeExcerpt(compiled, "zh");
 
@@ -325,21 +347,29 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(rendered).toContain("## L0 绝对边界 (绝对铁律 — 严禁违背，违反应立即重写)");
       expect(rendered).toContain("## L1 强力约束 (高优先级 — 仅在与L0直接冲突时可权衡)");
       expect(rendered).toContain("## L2 核心意图与读者体验目标 (软性意图引导)");
-      expect(rendered).toContain("## L3 创作自由区与留白保护 (Artistic Freedom & Negative Space)");
+      expect(rendered).toContain("## L3 创作自由区 (Artistic Freedom)");
 
-      // Verify L0 items
+      // Verify L0 items including negative space
       expect(rendered).toContain("[hc_cable_broken]");
       expect(rendered).toContain("canon:old_mine_closed");
       expect(rendered).toContain("【信息边界：真凶身份】");
       expect(rendered).toContain("【严禁捷径：no_magic_radio】");
-
-      // Verify negative space warning & lock icon
-      expect(rendered).toContain("### 留白保护区 (严禁过度解释或过早坐实)");
       expect(rendered).toContain("🔒");
-      expect(rendered).toContain("水银蒸馏管道具体由谁在出资运行");
+      expect(rendered).toContain("【留白边界】严禁坐实、过早揭秘或过度解释：“水银蒸馏管道具体由谁在出资运行”");
+
+      // Verify Before -> After cognitive transition with suspects and expects
+      expect(rendered).toContain("开章前读者既有状态 (Reader State Before)");
+      expect(rendered).toContain("本章后期望读者状态 (Desired Reader State After)");
+      expect(rendered).toContain("怀疑猜想 (Suspects)");
+      expect(rendered).toContain("领班并非失踪而是被灭口");
+      expect(rendered).toContain("剧情预期 (Expects)");
+      expect(rendered).toContain("地下暗河存在未被标记的泄压阀");
+
+      // Verify rewritten surpriseAllowed wording
+      expect(rendered).toContain("允许在既有边界内产生未预先指定的局部创意；这不是制造反转、冲突或悬念的要求。");
     });
 
-    it("Renders rich Markdown in English with clear precedence and negative space warnings", () => {
+    it("Renders rich Markdown in English with L0 negative space and Before->After cognitive transition", () => {
       const compiled = compileCreativeContract(sampleContract, { language: "en" });
       const rendered = renderCompiledDirectivesAsNarrativeExcerpt(compiled, "en");
 
@@ -347,12 +377,19 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(rendered).toContain("## L0 Absolute Boundaries (Mandatory — Zero Breach Tolerance)");
       expect(rendered).toContain("## L1 Strong Constraints (High Priority — Overridden Only by Direct L0 Conflict)");
       expect(rendered).toContain("## L2 Creative Intent & Target Reader Experience (Soft Guidance)");
-      expect(rendered).toContain("## L3 Artistic Freedom & Negative-Space Protection");
+      expect(rendered).toContain("## L3 Artistic Freedom");
 
       expect(rendered).toContain("[hc_cable_broken]");
       expect(rendered).toContain("[Information Boundary: 真凶身份]");
-      expect(rendered).toContain("### Negative-Space Protection (Strict Guardrails Against Over-Explaining)");
       expect(rendered).toContain("🔒");
+      expect(rendered).toContain("[Negative-Space Boundary]");
+
+      expect(rendered).toContain("Reader State Before Chapter (Input State)");
+      expect(rendered).toContain("Desired Reader State After Chapter (Target State)");
+      expect(rendered).toContain("Suspicions (Suspects)");
+      expect(rendered).toContain("Expectations (Expects)");
+
+      expect(rendered).toContain("Permitted to introduce unscripted local creative elements within boundaries; this is not a directive to manufacture twists or shocks.");
     });
   });
 
@@ -366,21 +403,23 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
         plan: v3PlanWithContract,
       });
 
-      // 1. Raw transport entry exists and is marked as transport
+      // 1. Raw transport entry exists and is marked as transport with audience: []
       const contractEntry = composed.contextPackage.selectedContext.find(
         (e) => e.source === CREATIVE_CONTRACT_CONTEXT_SOURCE,
       );
       expect(contractEntry).toBeDefined();
       expect(contractEntry?.protection).toBe("protected");
       expect(contractEntry?.consumption).toBe("transport");
+      expect(contractEntry?.audience).toEqual([]);
 
-      // 2. Compiled directives entry exists and is marked as narrative
+      // 2. Compiled directives entry exists and is marked as narrative with audience: ["writer"]
       const directivesEntry = composed.contextPackage.selectedContext.find(
         (e) => e.source === COMPILED_DIRECTIVES_CONTEXT_SOURCE,
       );
       expect(directivesEntry).toBeDefined();
       expect(directivesEntry?.protection).toBe("protected");
       expect(directivesEntry?.consumption).toBe("narrative");
+      expect(directivesEntry?.audience).toEqual(["writer"]);
       expect(directivesEntry?.excerpt).toContain("# 本章创作合约指令");
 
       // 3. Both are in trace protectedSources
@@ -461,8 +500,8 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
     });
   });
 
-  // 4. Writer vs. Settler Isolation Tests
-  describe("Writer vs. Settler Prompt Isolation", () => {
+  // 4. Consumer Audience Isolation Tests
+  describe("Consumer Audience Isolation: Writer vs. Reviser vs. Auditor vs. Settler", () => {
     it("Writer sees compiled directives in narrative context, but does NOT see raw contract transport JSON", async () => {
       const composed = await composeGovernedChapter({
         book,
@@ -490,12 +529,53 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
       expect(userPrompt).toContain("本章创作指令");
       expect(userPrompt).toContain("本章创作合约指令");
       expect(userPrompt).toContain("L0 绝对边界");
-      expect(userPrompt).toContain("留白保护区");
       expect(userPrompt).toContain("hc_cable_broken");
 
       // 2. Writer prompt MUST NOT contain raw contract JSON transport
       expect(userPrompt).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
       expect(userPrompt).not.toContain('"schemaVersion":1');
+    });
+
+    it("Reviser is isolated: does NOT receive raw contract NOR compiled directives", async () => {
+      const composed = await composeGovernedChapter({
+        book,
+        bookDir,
+        chapterNumber: 1,
+        plan: v3PlanWithContract,
+      });
+
+      const reviserContext = renderNarrativeSelectedContext(
+        composed.contextPackage.selectedContext,
+        "zh",
+        "reviser",
+      );
+
+      // Reviser MUST NOT contain raw contract or compiled directives
+      expect(reviserContext).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
+      expect(reviserContext).not.toContain(COMPILED_DIRECTIVES_CONTEXT_SOURCE);
+      expect(reviserContext).not.toContain("本章创作合约指令");
+      expect(reviserContext).not.toContain("L0 绝对边界");
+    });
+
+    it("Continuity Auditor is isolated: does NOT receive raw contract NOR compiled directives", async () => {
+      const composed = await composeGovernedChapter({
+        book,
+        bookDir,
+        chapterNumber: 1,
+        plan: v3PlanWithContract,
+      });
+
+      const auditorContext = renderNarrativeSelectedContext(
+        composed.contextPackage.selectedContext,
+        "zh",
+        "auditor",
+      );
+
+      // Auditor MUST NOT contain raw contract or compiled directives
+      expect(auditorContext).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
+      expect(auditorContext).not.toContain(COMPILED_DIRECTIVES_CONTEXT_SOURCE);
+      expect(auditorContext).not.toContain("本章创作合约指令");
+      expect(auditorContext).not.toContain("L0 绝对边界");
     });
 
     it("Settler is 100% isolated: receives NEITHER raw contract NOR compiled directives", async () => {
@@ -560,6 +640,7 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
             excerpt: "Directives 1",
             protection: "protected",
             consumption: "narrative",
+            audience: ["writer"],
           },
           {
             source: COMPILED_DIRECTIVES_CONTEXT_SOURCE,
@@ -567,6 +648,7 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
             excerpt: "Directives 2",
             protection: "protected",
             consumption: "narrative",
+            audience: ["writer"],
           },
         ],
       };
@@ -586,6 +668,7 @@ describe("Phase 3.5: Dynamic Contract Compiler & Directive Governance", () => {
             excerpt: "",
             protection: "protected",
             consumption: "narrative",
+            audience: ["writer"],
           },
         ],
       };

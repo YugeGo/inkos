@@ -2,10 +2,10 @@ import { z } from "zod";
 
 /**
  * Directive authority level in hierarchy of precedence:
- * - L0_ABSOLUTE: Non-negotiable hard boundaries, secrets, forbidden shortcuts (immediate rewrite on breach).
+ * - L0_ABSOLUTE: Non-negotiable hard boundaries, secrets, forbidden shortcuts, and negative-space guardrails.
  * - L1_STRONG: High-priority behavioral boundaries and persistence constraints.
- * - L2_SOFT: Chapter purpose, human core, reader transition, and narrative information strategy.
- * - L3_FREEDOM: Artistic freedom permissions and protected negative space (deliberate underspecification).
+ * - L2_SOFT: Chapter purpose, human core, reader transition (before -> after), and narrative information strategy.
+ * - L3_FREEDOM: Artistic freedom permissions (invent, vary, local creative allowance).
  */
 export const DirectiveAuthorityLevelSchema = z.enum([
   "L0_ABSOLUTE",
@@ -22,11 +22,11 @@ export const CompiledDirectiveCategorySchema = z.enum([
   "character_behavior",
   "character_belief",
   "forbidden_shortcut",
+  "negative_space",
   "chapter_purpose",
   "human_core",
   "target_reader_state",
   "author_intent_strategy",
-  "negative_space",
   "freedom_allowance",
 ]);
 export type CompiledDirectiveCategory = z.infer<typeof CompiledDirectiveCategorySchema>;
@@ -48,29 +48,60 @@ export const CompiledDirectiveSchema = z.object({
 export type CompiledDirective = z.infer<typeof CompiledDirectiveSchema>;
 
 /**
- * Negative-space protection item for elements that must remain ambiguous.
- * Prevents the narrative model from over-explaining or collapsing mysteries prematurely.
+ * Reader belief representation in compiled directives.
  */
-export const CompiledNegativeSpaceItemSchema = z.object({
-  topic: z.string().min(1),
-  directive: z.string().min(1),
-  sourceContractField: z.literal("freedomZone.mustRemainUnderspecified"),
+export const CompiledReaderBeliefSchema = z.object({
+  proposition: z.string().min(1),
+  strength: z.string().min(1),
 }).strict();
-export type CompiledNegativeSpaceItem = z.infer<typeof CompiledNegativeSpaceItemSchema>;
+export type CompiledReaderBelief = z.infer<typeof CompiledReaderBeliefSchema>;
 
 /**
- * L3 Artistic Freedom and Negative-Space Protection.
+ * Reader question representation in compiled directives.
+ */
+export const CompiledReaderQuestionSchema = z.object({
+  question: z.string().min(1),
+  salience: z.string().optional(),
+}).strict();
+export type CompiledReaderQuestion = z.infer<typeof CompiledReaderQuestionSchema>;
+
+/**
+ * Complete reader cognitive state preserving all 6 dimensions:
+ * knows, believes, suspects, expects, questions, emotionalPosition.
+ */
+export const CompiledReaderStateSchema = z.object({
+  knows: z.array(z.string()),
+  believes: z.array(CompiledReaderBeliefSchema),
+  suspects: z.array(CompiledReaderBeliefSchema),
+  expects: z.array(CompiledReaderBeliefSchema),
+  questions: z.array(CompiledReaderQuestionSchema),
+  emotionalPosition: z.array(z.string()),
+}).strict();
+export type CompiledReaderState = z.infer<typeof CompiledReaderStateSchema>;
+
+/**
+ * Full reader transition model preserving input baseline state (Before)
+ * and target state (After).
+ */
+export const CompiledReaderTransitionSchema = z.object({
+  inputState: CompiledReaderStateSchema.optional(),
+  desiredAfter: CompiledReaderStateSchema,
+}).strict();
+export type CompiledReaderTransition = z.infer<typeof CompiledReaderTransitionSchema>;
+
+/**
+ * L3 Artistic Freedom Zone: What the author explicitly empowers the model to create.
  */
 export const CompiledFreedomZoneSchema = z.object({
   mayInvent: z.array(z.string().min(1)),
   mayVary: z.array(z.string().min(1)),
   surpriseAllowed: z.boolean(),
-  negativeSpaceGuarantees: z.array(CompiledNegativeSpaceItemSchema),
+  underspecifiedTopics: z.array(z.string().min(1)),
 }).strict();
 export type CompiledFreedomZone = z.infer<typeof CompiledFreedomZoneSchema>;
 
 /**
- * L2 Soft Guidance: Chapter purpose, human core, reader transition, and author strategy.
+ * L2 Soft Guidance: Chapter purpose, human core, reader transition (Before -> After), and author strategy.
  */
 export const CompiledSoftGuidanceSchema = z.object({
   whyThisChapterExists: z.string().min(1),
@@ -83,18 +114,7 @@ export const CompiledSoftGuidanceSchema = z.object({
     secondary: z.array(z.string().min(1)).optional(),
     plotProgress: z.string().min(1).optional(),
   }).strict().optional(),
-  readerTransition: z.object({
-    desiredKnows: z.array(z.string()),
-    desiredBeliefs: z.array(z.object({
-      proposition: z.string(),
-      strength: z.string(),
-    }).strict()),
-    desiredQuestions: z.array(z.object({
-      question: z.string(),
-      salience: z.string().optional(),
-    }).strict()),
-    desiredEmotions: z.array(z.string()),
-  }).strict(),
+  readerTransition: CompiledReaderTransitionSchema,
   plannedAuthorIntent: z.object({
     readerEffects: z.array(z.string()),
     revealTargets: z.array(z.object({

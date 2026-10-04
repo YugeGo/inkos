@@ -17,6 +17,7 @@ import {
   CREATIVE_CONTRACT_CONTEXT_SOURCE,
   isProtectedContextSource,
   isTransportOnlyContextSource,
+  isConsumerContextSource,
   buildGovernedTrace,
 } from "../utils/context-assembly.js";
 import {
@@ -30,6 +31,7 @@ export {
   CREATIVE_CONTRACT_CONTEXT_SOURCE,
   COMPILED_DIRECTIVES_CONTEXT_SOURCE,
   isTransportOnlyContextSource,
+  isConsumerContextSource,
   extractCompiledDirectivesFromContextPackage,
 };
 
@@ -669,6 +671,7 @@ async function collectSelectedContext(
           excerpt: JSON.stringify(ChapterCreativeContractSchema.parse(plan.creativeContract)),
           protection: "protected" as const,
           consumption: "transport" as const,
+          audience: [],
         }]
       : [];
 
