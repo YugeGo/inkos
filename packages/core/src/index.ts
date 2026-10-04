@@ -247,6 +247,7 @@ export {
   ComposerAgent,
   composeGovernedChapter,
   CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  isTransportOnlyContextSource,
   extractCreativeContractFromContextPackage,
   type ComposeChapterInput,
   type ComposeChapterOutput,

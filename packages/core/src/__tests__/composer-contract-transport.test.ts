@@ -7,6 +7,7 @@ import {
   composeGovernedChapter,
   CREATIVE_CONTRACT_CONTEXT_SOURCE,
   extractCreativeContractFromContextPackage,
+  isTransportOnlyContextSource,
   normalizePlannerContract,
   type PlannerCreativeContractDraft,
   type PlanningEvidenceBundle,
@@ -14,7 +15,9 @@ import {
   type PlanChapterOutput,
   type BookConfig,
   type ContextBudget,
+  type ContextPackage,
 } from "../index.js";
+import { WriterAgent } from "../agents/writer.js";
 import { createInitialRuntimeState } from "../state/runtime-state-store.js";
 import type { AgentContext } from "../agents/base.js";
 
@@ -173,7 +176,7 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
     // No creativeContract (Native V2)
   };
 
-  it("AuthorMind V3: Composer produces exactly one protected contract entry", async () => {
+  it("AuthorMind V3: Composer produces exactly one protected contract entry with transport consumption", async () => {
     const composed = await composeGovernedChapter({
       book,
       bookDir,
@@ -191,6 +194,8 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
     const contractEntry = contractEntries[0];
     // 2. Must be protected tier
     expect(contractEntry.protection).toBe("protected");
+    expect(contractEntry.consumption).toBe("transport");
+    expect(isTransportOnlyContextSource(contractEntry)).toBe(true);
     expect(contractEntry.reason).toBe("Authoritative creative contract governing chapter writing.");
     expect(contractEntry.excerpt).toBeDefined();
   });
@@ -260,6 +265,7 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
     );
     expect(persistedContractEntry).toBeDefined();
     expect(persistedContractEntry.protection).toBe("protected");
+    expect(persistedContractEntry.consumption).toBe("transport");
 
     const persistedTraceContent = await readFile(composed.tracePath, "utf-8");
     const persistedTraceJson = JSON.parse(persistedTraceContent);
@@ -296,22 +302,14 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
 
   it("Compression Protection: contract entry is never passed to compressible context compiler", async () => {
     // Create a scenario where total tokens exceed budget, but protected tokens fit
-    const storyDir = join(bookDir, "story");
-    await mkdir(join(storyDir, "outline"), { recursive: true });
-    await writeFile(
-      join(storyDir, "outline", "story_frame.md"),
-      "# Chapter 1 Outline\n".repeat(50),
-      "utf-8",
-    );
-
     let compilerReceivedSources: string[] = [];
     const mockCompiler = vi.fn(async (req: any) => {
       compilerReceivedSources = req.compressibleEntries.map((e: any) => e.source);
-      return "Compressed summary of outline";
+      return "Compressed summary of background lore";
     });
 
     const budget: ContextBudget = {
-      contextWindowTokens: 2000,
+      contextWindowTokens: 2500,
       reservedOutputTokens: 500,
     };
 
@@ -321,12 +319,26 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
       chapterNumber: 1,
       plan: v3PlanWithContract,
       contextBudget: budget,
-      outlineSectionSelector: async (req) => req.candidates.map((c) => c.source),
+      referenceContextProvider: async () => ({
+        entries: [
+          {
+            source: "references/background_lore.md",
+            reason: "General background lore",
+            excerpt: "Long background lore content in the mine... ".repeat(200),
+            protection: "compressible",
+          },
+        ],
+        notes: [],
+      }),
       compressibleContextCompiler: mockCompiler,
     });
 
+    // Verified that compression actually occurred!
+    expect(mockCompiler).toHaveBeenCalledTimes(1);
+
     // 1. Contract was NEVER sent to the compressible compiler
     expect(compilerReceivedSources).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
+    expect(compilerReceivedSources).toContain("references/background_lore.md");
 
     // 2. Composed contextPackage still contains the uncompressed contract entry!
     const contractEntry = composed.contextPackage.selectedContext.find(
@@ -334,7 +346,99 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
     );
     expect(contractEntry).toBeDefined();
     expect(contractEntry?.protection).toBe("protected");
+    expect(contractEntry?.consumption).toBe("transport");
     expect(contractEntry?.excerpt).toBe(JSON.stringify(sampleContract));
+  });
+
+  it("Transport Invariant: extractCreativeContractFromContextPackage throws on duplicate contract entries", () => {
+    const corruptedPackage: ContextPackage = {
+      chapter: 1,
+      selectedContext: [
+        {
+          source: CREATIVE_CONTRACT_CONTEXT_SOURCE,
+          reason: "First contract",
+          excerpt: JSON.stringify(sampleContract),
+          protection: "protected",
+          consumption: "transport",
+        },
+        {
+          source: CREATIVE_CONTRACT_CONTEXT_SOURCE,
+          reason: "Duplicate contract",
+          excerpt: JSON.stringify(sampleContract),
+          protection: "protected",
+          consumption: "transport",
+        },
+      ],
+    };
+
+    expect(() => extractCreativeContractFromContextPackage(corruptedPackage)).toThrow(
+      /ContextPackage invariant violation: expected at most 1 creative contract entry, found 2/,
+    );
+  });
+
+  it("Transport Consumption Isolation: WriterAgent user prompt does NOT render raw contract or contract schema", async () => {
+    const composed = await composeGovernedChapter({
+      book,
+      bookDir,
+      chapterNumber: 1,
+      plan: v3PlanWithContract,
+    });
+
+    const mockWriter = new WriterAgent({
+      client: { defaults: { maxTokens: 4096 } } as any,
+      model: "test-writer",
+      projectRoot: tempDir,
+    } as AgentContext);
+
+    const userPrompt = (mockWriter as any).buildGovernedUserPrompt({
+      chapterNumber: 1,
+      chapterMemo: v3PlanWithContract.memo,
+      chapterIntentData: v3PlanWithContract.intent,
+      contextPackage: composed.contextPackage,
+      lengthSpec: { target: 3000, countingMode: "zh_chars" },
+      language: "zh",
+    });
+
+    // Contract transport entry MUST be isolated from raw prompt rendering in Phase 3
+    expect(userPrompt).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
+    expect(userPrompt).not.toContain("whyThisChapterExists");
+    expect(userPrompt).not.toContain("schemaVersion");
+    expect(userPrompt).not.toContain("desiredAfter");
+    expect(userPrompt).not.toContain("forbiddenShortcuts");
+    expect(userPrompt).not.toContain("mastermind_motivation");
+
+    // Standard memo and goal MUST still be present
+    expect(userPrompt).toContain("Arthur 带领小队进入矿道");
+    expect(userPrompt).toContain("调查矿井深处");
+  });
+
+  it("Transport Consumption Isolation: Settler control block does NOT leak raw contract or planning intent", async () => {
+    const composed = await composeGovernedChapter({
+      book,
+      bookDir,
+      chapterNumber: 1,
+      plan: v3PlanWithContract,
+    });
+
+    const mockWriter = new WriterAgent({
+      client: { defaults: { maxTokens: 4096 } } as any,
+      model: "test-writer",
+      projectRoot: tempDir,
+    } as AgentContext);
+
+    const settlerControlBlock = (mockWriter as any).buildSettlerGovernedControlBlock(
+      "调查矿井深处",
+      composed.contextPackage,
+      "zh",
+    );
+
+    // Contract transport entry MUST NOT contaminate state settlement
+    expect(settlerControlBlock).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
+    expect(settlerControlBlock).not.toContain("whyThisChapterExists");
+    expect(settlerControlBlock).not.toContain("schemaVersion");
+    expect(settlerControlBlock).not.toContain("desiredAfter");
+    expect(settlerControlBlock).not.toContain("mastermind_motivation");
+    expect(settlerControlBlock).not.toContain("forbiddenShortcuts");
   });
 
   it("ComposerAgent integration: composer.composeChapter transports contract end-to-end", async () => {

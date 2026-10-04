@@ -13,18 +13,33 @@ import {
   type ChapterCreativeContract,
 } from "../models/input-governance.js";
 
-export const CREATIVE_CONTRACT_CONTEXT_SOURCE = "runtime/chapter_creative_contract";
+import {
+  CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  isProtectedContextSource,
+  isTransportOnlyContextSource,
+  buildGovernedTrace,
+} from "../utils/context-assembly.js";
+
+export { CREATIVE_CONTRACT_CONTEXT_SOURCE, isTransportOnlyContextSource };
 
 /**
  * Extracts and parses the canonical creative contract from a transported ContextPackage.
  * Returns undefined if no contract context entry is present.
+ * Throws if duplicate contract entries are detected.
  */
 export function extractCreativeContractFromContextPackage(
   contextPackage: ContextPackage,
 ): ChapterCreativeContract | undefined {
-  const entry = contextPackage.selectedContext.find(
+  const entries = contextPackage.selectedContext.filter(
     (e) => e.source === CREATIVE_CONTRACT_CONTEXT_SOURCE,
   );
+  if (entries.length === 0) return undefined;
+  if (entries.length > 1) {
+    throw new Error(
+      `ContextPackage invariant violation: expected at most 1 creative contract entry, found ${entries.length}.`,
+    );
+  }
+  const entry = entries[0];
   if (!entry?.excerpt) return undefined;
   return ChapterCreativeContractSchema.parse(JSON.parse(entry.excerpt));
 }
@@ -36,10 +51,7 @@ import {
   type MemorySemanticSelectionRequest,
   type MemorySemanticSelector,
 } from "../utils/memory-retrieval.js";
-import {
-  buildGovernedTrace,
-  isProtectedContextSource,
-} from "../utils/context-assembly.js";
+
 import { writeGovernedRuntimeArtifacts } from "../utils/runtime-writer.js";
 import { estimateTextTokens, type LLMClient } from "../llm/provider.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
@@ -639,8 +651,9 @@ async function collectSelectedContext(
       ? [{
           source: CREATIVE_CONTRACT_CONTEXT_SOURCE,
           reason: "Authoritative creative contract governing chapter writing.",
-          excerpt: JSON.stringify(plan.creativeContract),
+          excerpt: JSON.stringify(ChapterCreativeContractSchema.parse(plan.creativeContract)),
           protection: "protected" as const,
+          consumption: "transport" as const,
         }]
       : [];
 

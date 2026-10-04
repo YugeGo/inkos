@@ -1,4 +1,5 @@
 import type { ChapterIntent, ChapterMemo, ContextPackage } from "../models/input-governance.js";
+import { isTransportOnlyContextSource } from "./context-assembly.js";
 
 /**
  * Render a ChapterMemo + optional ChapterIntent into a sanitized narrative
@@ -44,7 +45,9 @@ export function renderNarrativeSelectedContext(
   const reasonLabel = language === "en" ? "reason" : "原因";
   const detailLabel = language === "en" ? "detail" : "细节";
 
-  return entries
+  const narrativeEntries = entries.filter((entry) => !isTransportOnlyContextSource(entry));
+
+  return narrativeEntries
     .map((entry, index) => {
       const lines = [
         `### ${heading} ${index + 1}`,

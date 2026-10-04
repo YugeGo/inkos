@@ -21,6 +21,7 @@ export const ContextSourceSchema = z.object({
   reason: z.string().min(1),
   excerpt: z.string().optional(),
   protection: z.enum(["protected", "compressible"]),
+  consumption: z.enum(["narrative", "transport"]).optional(),
 }).strict();
 
 export type ContextSource = z.infer<typeof ContextSourceSchema>;

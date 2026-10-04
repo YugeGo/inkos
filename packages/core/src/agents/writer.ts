@@ -21,6 +21,7 @@ import {
 } from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { renderMemoAsNarrativeBlock, renderNarrativeSelectedContext } from "../utils/narrative-control.js";
+import { isTransportOnlyContextSource } from "../utils/context-assembly.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { commitAtomicFileSet, type AtomicFileWrite } from "../utils/atomic-file-set.js";
@@ -464,10 +465,13 @@ export class WriterAgent extends BaseAgent {
     // short-term focus) must land as a prominent, binding block near the top — not
     // buried among generic "evidence" entries where the model treats them as optional.
     const DIRECTION_SOURCES = new Set(["story/author_intent.md", "story/current_focus.md"]);
-    const directionEntries = params.contextPackage.selectedContext.filter((entry) =>
+    const narrativeEntries = params.contextPackage.selectedContext.filter((entry) =>
+      !isTransportOnlyContextSource(entry),
+    );
+    const directionEntries = narrativeEntries.filter((entry) =>
       DIRECTION_SOURCES.has(entry.source),
     );
-    const otherEntries = params.contextPackage.selectedContext.filter((entry) =>
+    const otherEntries = narrativeEntries.filter((entry) =>
       !DIRECTION_SOURCES.has(entry.source),
     );
     const contextSections = renderNarrativeSelectedContext(otherEntries, language);

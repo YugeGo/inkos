@@ -46,8 +46,16 @@ export function buildGovernedTrace(params: {
   });
 }
 
+export const CREATIVE_CONTRACT_CONTEXT_SOURCE = "runtime/chapter_creative_contract";
+
 export function isProtectedContextSource(input: ContextPackage["selectedContext"][number]): boolean {
   return input.protection === "protected";
+}
+
+export function isTransportOnlyContextSource(
+  input: ContextPackage["selectedContext"][number],
+): boolean {
+  return input.consumption === "transport" || input.source === CREATIVE_CONTRACT_CONTEXT_SOURCE;
 }
 
 function sumContextTokens(entries: ReadonlyArray<ContextPackage["selectedContext"][number]>): number {
