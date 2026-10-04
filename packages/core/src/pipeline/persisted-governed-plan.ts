@@ -1,8 +1,17 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import type { PlanChapterOutput } from "../agents/planner.js";
 import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
+import type { BookConfig } from "../models/book.js";
+import type { AgentContext } from "../agents/base.js";
+import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
+import type { LengthSpec } from "../models/length-governance.js";
+import { buildLengthSpec } from "../utils/length-metrics.js";
+import { loadPlanningSeedMaterials, type PlanningSeedMaterials } from "../utils/planning-materials.js";
+import { buildPlanningEvidenceBundle } from "../agents/planner-evidence.js";
+import { getAuthorMindPlannerSystemPrompt } from "../agents/planner-prompts.js";
+import { GovernedPlanContractToolSchema } from "../agents/planner-tool.js";
 import { createHash } from "node:crypto";
 import {
   ChapterCreativeContractSchema,
@@ -12,31 +21,38 @@ import {
   type ChapterIntent,
 } from "../models/input-governance.js";
 
+export const PLANNER_PROMPT_VERSION = "author-mind-planner-v2.2.1";
+export const PLANNER_TOOL_VERSION = 2;
+
 /**
  * Computes deterministic protocol fingerprint from actual prompt, tool schema,
- * and contract schema version to ensure any prompt/tool edit immediately invalidates cache.
+ * activated skills, and contract schema version to ensure any prompt/tool/skill edit
+ * immediately invalidates cache.
  */
 export function computePlannerProtocolHash(params: {
   readonly systemPrompt: string;
   readonly toolSchema: unknown;
   readonly contractSchemaVersion: number;
   readonly language: string;
+  readonly skillFingerprint?: string;
 }): string {
   const content = [
     params.systemPrompt,
     JSON.stringify(params.toolSchema),
     String(params.contractSchemaVersion),
     params.language,
+    params.skillFingerprint ?? "",
   ].join(":::");
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
 /**
  * Computes deterministic fingerprint hash for planning configuration
- * to ensure cache invalidation when model/prompt/schema changes.
+ * to ensure cache invalidation when model/provider/service/prompt/schema changes.
  */
 export function computePlannerConfigHash(params: {
   readonly provider?: string;
+  readonly service?: string;
   readonly model?: string;
   readonly promptVersion?: string;
   readonly toolVersion?: number;
@@ -46,6 +62,7 @@ export function computePlannerConfigHash(params: {
 }): string {
   const payload = JSON.stringify({
     provider: params.provider ?? "",
+    service: params.service ?? "",
     model: params.model ?? "",
     promptVersion: params.promptVersion ?? "",
     toolVersion: params.toolVersion ?? 0,
@@ -65,6 +82,7 @@ export interface PlanningInputFingerprintData {
   readonly lengthBudget?: { target: number; unit: string };
   readonly previousEndingExcerpt?: string;
   readonly selectedSources?: ReadonlyArray<string>;
+  readonly relevantSourceChecksums?: ReadonlyArray<{ path: string; hash: string }>;
 }
 
 /**
@@ -109,6 +127,12 @@ export function computePlanningInputHash(
       lines.push(`meta|source|${src}`);
     }
   }
+  if (data.relevantSourceChecksums) {
+    const sortedChecksums = [...data.relevantSourceChecksums].sort((a, b) => a.path.localeCompare(b.path));
+    for (const item of sortedChecksums) {
+      lines.push(`sourceChecksum|${item.path}|${item.hash}`);
+    }
+  }
 
   // 2. Canonically sorted Evidence Bundle
   const categories = [
@@ -134,6 +158,161 @@ export function computePlanningInputHash(
   }
 
   return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
+}
+
+/**
+ * Computes deterministic content checksums for story seed files
+ * to invalidate cached plan if user/author directly edits outline or intent files.
+ */
+export async function computeRelevantSourcesChecksum(
+  bookDir: string,
+): Promise<ReadonlyArray<{ path: string; hash: string }>> {
+  const storyDir = join(bookDir, "story");
+  const relativeTargets = [
+    "author_intent.md",
+    "current_focus.md",
+    "brief.md",
+    "book_rules.json",
+    "book_rules.md",
+    "outline/story_frame.md",
+    "outline/volume_map.md",
+  ];
+
+  const results: Array<{ path: string; hash: string }> = [];
+  for (const relPath of relativeTargets) {
+    const fullPath = join(storyDir, relPath);
+    try {
+      const content = await readFile(fullPath, "utf-8");
+      const hash = createHash("sha256").update(content).digest("hex").slice(0, 16);
+      results.push({ path: relPath, hash });
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+  }
+  return results;
+}
+
+/**
+ * Deterministic fingerprint for activated skills.
+ */
+export function computeSkillsFingerprint(
+  skills?: ReadonlyArray<ActivatedSkillGuidance | { name: string; guidance?: string }>,
+): string {
+  if (!skills || skills.length === 0) return "";
+  const items = skills.map((s) => {
+    if ("skill" in s) {
+      return {
+        id: s.skill.id,
+        content: (s.resources ?? []).map((r) => r.path).join(","),
+      };
+    }
+    return {
+      id: s.name,
+      content: s.guidance ?? "",
+    };
+  });
+  const sorted = [...items].sort((a, b) => a.id.localeCompare(b.id));
+  const payload = sorted.map((s) => `${s.id}:${s.content}`).join("\n");
+  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+export interface PreparedPlanningFingerprint {
+  readonly evidenceBundle: PlanningEvidenceBundle;
+  readonly seedMaterials: PlanningSeedMaterials;
+  readonly lengthSpec: LengthSpec;
+  readonly taskGoal: string;
+  readonly configHash: string;
+  readonly inputHash: string;
+  readonly protocolHash: string;
+}
+
+/**
+ * Single authoritative planner fingerprint builder used symmetrically by Planner and Runner.
+ * Eliminates fingerprint drift between planning generation and cache verification.
+ */
+export async function preparePlanningFingerprint(params: {
+  readonly book: BookConfig;
+  readonly bookDir: string;
+  readonly chapterNumber: number;
+  readonly externalContext?: string;
+  readonly plannerCtx: AgentContext;
+  readonly evidenceBundle?: PlanningEvidenceBundle;
+}): Promise<PreparedPlanningFingerprint> {
+  const language = params.book.language ?? "zh";
+  const lengthSpec = buildLengthSpec(params.book.chapterWordCount, language);
+
+  const seedMaterials = await loadPlanningSeedMaterials({
+    bookDir: params.bookDir,
+    chapterNumber: params.chapterNumber,
+  });
+
+  const taskGoal = [
+    params.externalContext,
+    seedMaterials.currentFocus,
+    seedMaterials.authorIntent,
+    seedMaterials.brief,
+  ].map((value) => value?.trim()).filter(Boolean).join("\n\n")
+    || (language === "en"
+      ? `Continue chapter ${params.chapterNumber} from the current Work state.`
+      : `根据当前作品状态续写第${params.chapterNumber}章。`);
+
+  const evidenceBundle = params.evidenceBundle ?? await buildPlanningEvidenceBundle({
+    bookDir: params.bookDir,
+    chapterNumber: params.chapterNumber,
+    currentInstruction: params.externalContext,
+  });
+
+  const client = params.plannerCtx.client as any;
+  const provider = client?.provider ?? "unknown";
+  const service = client?.service ?? client?.config?.service ?? "";
+  const model = params.plannerCtx.model;
+
+  const skillFingerprint = computeSkillsFingerprint(params.plannerCtx.activatedSkills);
+
+  const protocolHash = computePlannerProtocolHash({
+    systemPrompt: getAuthorMindPlannerSystemPrompt(language),
+    toolSchema: GovernedPlanContractToolSchema,
+    contractSchemaVersion: 1,
+    language,
+    skillFingerprint,
+  });
+
+  const configHash = computePlannerConfigHash({
+    provider,
+    service,
+    model,
+    promptVersion: PLANNER_PROMPT_VERSION,
+    toolVersion: PLANNER_TOOL_VERSION,
+    contractSchemaVersion: 1,
+    authorMindEnabled: true,
+    protocolHash,
+  });
+
+  const relevantSourceChecksums = await computeRelevantSourcesChecksum(params.bookDir);
+
+  const inputHash = computePlanningInputHash({
+    chapterNumber: params.chapterNumber,
+    evidenceBundle,
+    currentInstruction: params.externalContext,
+    externalContext: params.externalContext,
+    taskGoal,
+    lengthBudget: {
+      target: lengthSpec.target,
+      unit: lengthSpec.countingMode === "en_words" ? "words" : "字",
+    },
+    previousEndingExcerpt: seedMaterials.previousEndingExcerpt,
+    relevantSourceChecksums,
+  });
+
+  return {
+    evidenceBundle,
+    seedMaterials,
+    lengthSpec,
+    taskGoal,
+    configHash,
+    inputHash,
+    protocolHash,
+  };
 }
 
 /**
@@ -251,6 +430,24 @@ export async function savePersistedPlan(
       plannerInputs: plan.plannerInputs,
     });
   } else {
+    // Before overwriting an existing V3 plan on disk with a V2 plan, archive it safely
+    const targetPath = planPath(bookDir, plan.memo.chapter);
+    try {
+      const existingRaw = await readFile(targetPath, "utf-8");
+      const existingJson = JSON.parse(existingRaw);
+      if (existingJson?.version === 3 && existingJson?.creativeContract) {
+        const historyDir = join(bookDir, "story", "runtime", "history");
+        await mkdir(historyDir, { recursive: true });
+        const padded = String(plan.memo.chapter).padStart(4, "0");
+        const archiveFilename = `chapter-${padded}.plan.author-mind.${Date.now()}.json`;
+        await writeFile(join(historyDir, archiveFilename), existingRaw, "utf-8");
+      }
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") {
+        // Non-fatal if read/archive fails, but don't crash
+      }
+    }
+
     value = PersistedPlanV2Schema.parse({
       version: 2,
       intent: plan.intent,

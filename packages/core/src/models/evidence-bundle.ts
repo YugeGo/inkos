@@ -13,6 +13,9 @@ export const EvidenceAuthoritySchema = z.enum([
 ]);
 export type EvidenceAuthority = z.infer<typeof EvidenceAuthoritySchema>;
 
+export const EvidenceTemporalScopeSchema = z.enum(["current", "historical"]);
+export type EvidenceTemporalScope = z.infer<typeof EvidenceTemporalScopeSchema>;
+
 /**
  * A single piece of evidence provided to the planner with explicit authority level.
  */
@@ -20,6 +23,7 @@ export const EvidenceItemSchema = z.object({
   ref: z.string().min(1).max(256),
   text: z.string().min(1).max(1000),
   authority: EvidenceAuthoritySchema,
+  temporalScope: EvidenceTemporalScopeSchema.optional(),
 }).strict();
 export type EvidenceItem = z.infer<typeof EvidenceItemSchema>;
 
@@ -45,28 +49,51 @@ export function isCanonAuthority(authority: EvidenceAuthority): boolean {
   return authority === "canon";
 }
 
+export type EvidenceCategory =
+  | "canonFacts"
+  | "runtimeState"
+  | "bookRules"
+  | "activeHooks"
+  | "outlineIntentions"
+  | "authorInstructions";
+
+export interface EvidenceLookupRecord {
+  readonly category: EvidenceCategory;
+  readonly item: EvidenceItem;
+}
+
+/**
+ * Lookup evidence item with its category across all sections in the bundle.
+ */
+export function lookupEvidenceRecord(
+  bundle: PlanningEvidenceBundle,
+  ref: string,
+): EvidenceLookupRecord | undefined {
+  for (const item of bundle.canonFacts) {
+    if (item.ref === ref) return { category: "canonFacts", item };
+  }
+  for (const item of bundle.runtimeState) {
+    if (item.ref === ref) return { category: "runtimeState", item };
+  }
+  for (const item of bundle.bookRules) {
+    if (item.ref === ref) return { category: "bookRules", item };
+  }
+  for (const item of bundle.activeHooks) {
+    if (item.ref === ref) return { category: "activeHooks", item };
+  }
+  for (const item of bundle.outlineIntentions) {
+    if (item.ref === ref) return { category: "outlineIntentions", item };
+  }
+  for (const item of bundle.authorInstructions) {
+    if (item.ref === ref) return { category: "authorInstructions", item };
+  }
+  return undefined;
+}
+
 /**
  * Lookup evidence item by reference across all categories in the bundle.
  */
 export function lookupEvidenceRef(bundle: PlanningEvidenceBundle, ref: string): EvidenceItem | undefined {
-  for (const item of bundle.canonFacts) {
-    if (item.ref === ref) return item;
-  }
-  for (const item of bundle.runtimeState) {
-    if (item.ref === ref) return item;
-  }
-  for (const item of bundle.bookRules) {
-    if (item.ref === ref) return item;
-  }
-  for (const item of bundle.activeHooks) {
-    if (item.ref === ref) return item;
-  }
-  for (const item of bundle.outlineIntentions) {
-    if (item.ref === ref) return item;
-  }
-  for (const item of bundle.authorInstructions) {
-    if (item.ref === ref) return item;
-  }
-  return undefined;
+  return lookupEvidenceRecord(bundle, ref)?.item;
 }
 

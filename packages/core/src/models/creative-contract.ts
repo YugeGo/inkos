@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   type PlanningEvidenceBundle,
   lookupEvidenceRef,
+  lookupEvidenceRecord,
 } from "./evidence-bundle.js";
 
 /**
@@ -487,53 +488,94 @@ export function validateCreativeContractSemantics(
             code: "MISSING_CANON_SOURCEREF",
           });
         } else {
-          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
-          if (!evidence) {
+          const rec = lookupEvidenceRecord(bundle, hc.sourceRef);
+          if (!rec) {
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
               message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}" not in PlanningEvidenceBundle.`,
               code: "UNVERIFIED_EVIDENCE_REFERENCE",
             });
-          } else if (evidence.authority !== "canon") {
+          } else if (rec.item.temporalScope === "historical") {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" claims source "canon" but references expired historical fact "${hc.sourceRef}". Historical facts cannot be active canon constraints.`,
+              code: "HISTORICAL_CANON_CONFUSION",
+            });
+          } else if (rec.category !== "canonFacts" || rec.item.authority !== "canon") {
             // Strict Canon boundary check!
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
-              message: `Hard constraint "${hc.id}" claims source "canon" but references evidence "${hc.sourceRef}" with authority "${evidence.authority}". Only verified canon facts are valid for canon constraints.`,
-              code: evidence.authority === "outline" ? "OUTLINE_CANON_CONFUSION" : "INVALID_CANON_AUTHORITY",
+              message: `Hard constraint "${hc.id}" claims source "canon" but references evidence "${hc.sourceRef}" with authority "${rec.item.authority}". Only verified canon facts are valid for canon constraints.`,
+              code: rec.item.authority === "outline" ? "OUTLINE_CANON_CONFUSION" : "INVALID_CANON_AUTHORITY",
             });
           }
         }
       } else if (hc.source === "world") {
-        if (hc.sourceRef) {
-          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
-          if (!evidence) {
+        if (!hc.sourceRef) {
+          errors.push({
+            path: `hardConstraints[${i}].sourceRef`,
+            message: `Hard constraint "${hc.id}" claims source "world" but provides no sourceRef provenance. World rules must cite runtimeState or bookRules evidence.`,
+            code: "MISSING_WORLD_SOURCEREF",
+          });
+        } else {
+          const rec = lookupEvidenceRecord(bundle, hc.sourceRef);
+          if (!rec) {
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
               message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}" not in PlanningEvidenceBundle.`,
               code: "UNVERIFIED_EVIDENCE_REFERENCE",
             });
-          } else if (evidence.authority === "outline") {
+          } else if (rec.category === "activeHooks") {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" attempts to treat active hook "${hc.sourceRef}" as established world truth. Hooks are dramatic intentions, not world facts.`,
+              code: "HOOK_AS_WORLD_REALITY",
+            });
+          } else if (rec.item.authority === "outline" || rec.category === "outlineIntentions") {
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
               message: `Hard constraint "${hc.id}" attempts to treat outline intention "${hc.sourceRef}" as world reality.`,
               code: "OUTLINE_CANON_CONFUSION",
             });
+          } else if (rec.category !== "runtimeState" && rec.category !== "bookRules") {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" claims source "world" but references evidence "${hc.sourceRef}" in category "${rec.category}". World rules must cite runtimeState or bookRules.`,
+              code: "INVALID_WORLD_AUTHORITY",
+            });
           }
         }
       } else if (hc.source === "author") {
-        if (hc.sourceRef) {
-          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
-          if (!evidence) {
+        if (!hc.sourceRef) {
+          errors.push({
+            path: `hardConstraints[${i}].sourceRef`,
+            message: `Hard constraint "${hc.id}" claims source "author" but provides no sourceRef provenance. Author constraints must cite explicit author instructions.`,
+            code: "MISSING_AUTHOR_SOURCEREF",
+          });
+        } else {
+          const rec = lookupEvidenceRecord(bundle, hc.sourceRef);
+          if (!rec) {
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
               message: `Hard constraint "${hc.id}" references unverified author instruction "${hc.sourceRef}".`,
               code: "UNVERIFIED_EVIDENCE_REFERENCE",
             });
-          } else if (evidence.authority !== "author_instruction") {
+          } else if (rec.category !== "authorInstructions" || rec.item.authority !== "author_instruction") {
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
-              message: `Hard constraint "${hc.id}" claims source "author" but references evidence "${hc.sourceRef}" with authority "${evidence.authority}".`,
+              message: `Hard constraint "${hc.id}" claims source "author" but references evidence "${hc.sourceRef}" with authority "${rec.item.authority}".`,
               code: "INVALID_AUTHOR_INSTRUCTION_AUTHORITY",
+            });
+          }
+        }
+      } else if (hc.source === "logic") {
+        if (hc.sourceRef) {
+          const rec = lookupEvidenceRecord(bundle, hc.sourceRef);
+          if (!rec) {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}".`,
+              code: "UNVERIFIED_EVIDENCE_REFERENCE",
             });
           }
         }

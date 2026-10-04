@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   PlannerAgent,
+  PipelineRunner,
   normalizePlannerContract,
   buildPlanningEvidenceBundle,
   validateCreativeContractSemantics,
@@ -11,9 +12,13 @@ import {
   computePlannerConfigHash,
   computePlannerProtocolHash,
   computePlanningInputHash,
+  preparePlanningFingerprint,
   resolveAuthorMindEnabled,
+  savePersistedPlan,
+  loadPersistedPlan,
   type PlannerCreativeContractDraft,
   type PlanningEvidenceBundle,
+  type PlanChapterOutput,
 } from "../index.js";
 import { createInitialRuntimeState } from "../state/runtime-state-store.js";
 import type { AgentContext } from "../agents/base.js";
@@ -278,8 +283,11 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     // Only the 2 currently valid facts are placed into runtime_state
     expect(bundle.runtimeState).toHaveLength(2);
     expect(bundle.runtimeState[0].authority).toBe("runtime_state");
-    // The expired fact is captured under canon facts
-    expect(bundle.canonFacts.some((f) => f.ref.includes("flashlight.battery"))).toBe(true);
+    // The expired fact is captured under canon facts with historical scope and chapter disambiguation
+    const expiredFact = bundle.canonFacts.find((f) => f.ref.includes("flashlight.battery"));
+    expect(expiredFact).toBeDefined();
+    expect(expiredFact?.temporalScope).toBe("historical");
+    expect(expiredFact?.ref).toBe("canon:expired#flashlight.battery@ch0");
     expect(bundle.characterIds).toContain("arthur");
     expect(bundle.characterIds).toContain("clara");
     expect(bundle.activeHooks[0].ref).toBe("hook:hk_01");
@@ -306,6 +314,20 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     ).rejects.toThrow(/Authoritative runtime state is invalid or corrupted \(Fail-Closed\)/);
   });
 
+  it("fails closed when manifest.json exists but required state file (hooks.json) is missing", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const stateDir = join(tempDir, "story", "state");
+    // Delete hooks.json while manifest.json still exists
+    await rm(join(stateDir, "hooks.json"), { force: true });
+
+    await expect(
+      buildPlanningEvidenceBundle({
+        bookDir: tempDir,
+        chapterNumber: 1,
+      }),
+    ).rejects.toThrow(/Authoritative runtime state is invalid or corrupted \(Fail-Closed\)/);
+  });
+
   it("fails closed when book_rules.json exists but is schema-invalid", async () => {
     await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
     const storyDir = join(tempDir, "story");
@@ -323,6 +345,40 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
         chapterNumber: 1,
       }),
     ).rejects.toThrow(/Authoritative book_rules.json is invalid or corrupted \(Fail-Closed\)/);
+  });
+
+  it("preserves book_rules.json single authority: does not fall back to book_rules.md when rules.json has empty prohibitions", async () => {
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const storyDir = join(tempDir, "story");
+
+    // book_rules.json exists with valid version 2, but empty prohibitions and no protagonist
+    await writeFile(
+      join(storyDir, "book_rules.json"),
+      JSON.stringify({
+        version: "2",
+        genreLock: { primary: "科幻", forbidden: [] },
+        prohibitions: [],
+        enableFullCastTracking: true,
+        allowedDeviations: [],
+      }),
+      "utf-8",
+    );
+
+    // Legacy book_rules.md also exists with rules
+    await writeFile(
+      join(storyDir, "book_rules.md"),
+      "- 严禁超光速通讯\n- 严禁违背因果律",
+      "utf-8",
+    );
+
+    const bundle = await buildPlanningEvidenceBundle({
+      bookDir: tempDir,
+      chapterNumber: 1,
+    });
+
+    // Must NOT contain rules from book_rules.md because book_rules.json exists!
+    expect(bundle.bookRules).toHaveLength(0);
+    expect(bundle.bookRules.some((r) => r.text.includes("超光速"))).toBe(false);
   });
 
   it("executes two-attempt validation/repair state machine in planGovernedContract and fails closed on repeated failure", async () => {
@@ -866,5 +922,187 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
 
     expect(resolveAuthorMindEnabled({ features: { authorMind: false } }, true)).toBe(true);
     expect(resolveAuthorMindEnabled({ features: { authorMind: true } }, false)).toBe(false);
+  });
+
+  it("end-to-end: Planner generation and Runner recomputation achieve 100% cache hit, and invalidate on input change", async () => {
+    // Setup book environment with runtime state and story files
+    await createInitialRuntimeState({ bookDir: tempDir, language: "zh" });
+    const storyDir = join(tempDir, "story");
+    const runtimeDir = join(storyDir, "runtime");
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(join(storyDir, "current_focus.md"), "初次焦点：勘探外围矿道", "utf-8");
+    await writeFile(join(storyDir, "author_intent.md"), "意图：保持步步为营的张力", "utf-8");
+    await writeFile(join(storyDir, "brief.md"), "故事简述：关于矿山深处的探索", "utf-8");
+    await writeFile(
+      join(storyDir, "book_rules.json"),
+      JSON.stringify({
+        version: "2",
+        genreLock: { primary: "悬疑", forbidden: [] },
+        prohibitions: ["不得引入魔法"],
+        enableFullCastTracking: true,
+        allowedDeviations: [],
+      }),
+      "utf-8",
+    );
+    const rolesDir = join(storyDir, "roles", "主要角色");
+    await mkdir(rolesDir, { recursive: true });
+    await writeFile(join(rolesDir, "Arthur.md"), "# Arthur\n主要角色", "utf-8");
+
+    const book = {
+      id: "test-book",
+      title: "矿山探索",
+      platform: "default",
+      genre: "suspense",
+      status: "active" as const,
+      targetChapters: 10,
+      chapterWordCount: 3000,
+      language: "zh" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      features: { authorMind: true },
+    };
+
+    let planStructuredCalls = 0;
+    vi.spyOn(PlannerAgent.prototype as any, "submitStructured").mockImplementation(async () => {
+      planStructuredCalls++;
+      return {
+        result: {
+          goal: "勘探外围矿道",
+          body: "规划正文：详细调查第1号矿井",
+          threadRefs: [],
+          contractDraft: {
+            ...sampleDraft,
+            hardConstraints: [
+              {
+                semanticKey: "rule_no_magic",
+                statement: "不得引入魔法",
+                source: "world" as const,
+                sourceRef: "rule:prohibition#01",
+                priority: "absolute" as const,
+              },
+            ],
+          },
+        },
+        usage: { promptTokens: 100, completionTokens: 100, totalTokens: 200 },
+      };
+    });
+
+    const planner = new PlannerAgent({
+      client: { defaults: { maxTokens: 4096 }, provider: "test-provider" } as any,
+      model: "test-model",
+      projectRoot: tempDir,
+    } as AgentContext);
+
+    // 1. Planner generates plan with Author-Mind enabled
+    const generatedPlan = await planner.planChapter({
+      book,
+      bookDir: tempDir,
+      chapterNumber: 1,
+      authorMindEnabled: true,
+    });
+    expect(planStructuredCalls).toBe(1);
+    expect(generatedPlan.planningProfile?.authorMindEnabled).toBe(true);
+
+    // Save to disk (persisted plan)
+    await savePersistedPlan(tempDir, generatedPlan, { authorMindEnabled: true });
+
+    // 2. Runner re-evaluates plan with identical inputs
+    const runner = new PipelineRunner({
+      projectRoot: tempDir,
+      client: { defaults: { maxTokens: 4096 }, provider: "test-provider" } as any,
+      model: "test-model",
+    });
+
+    // Runner calls resolveGovernedPlan with reuseExistingIntentWhenContextMissing: true
+    const reusedPlan = await (runner as any).resolveGovernedPlan(
+      book,
+      tempDir,
+      1,
+      undefined,
+      { reuseExistingIntentWhenContextMissing: true },
+    );
+
+    // Reused plan should be the exact persisted plan, with NO extra LLM call
+    expect(planStructuredCalls).toBe(1); // Still 1! Cache HIT!
+    expect(reusedPlan.memo.goal).toBe("勘探外围矿道");
+    expect(reusedPlan.planningProfile?.planningInputHash).toBe(generatedPlan.planningProfile?.planningInputHash);
+
+    // 3. Invalidation: Modify current_focus.md on disk
+    await writeFile(join(storyDir, "current_focus.md"), "焦点改变：矿道发生坍塌事故！", "utf-8");
+
+    // Runner re-evaluates: must detect hash mismatch and trigger planner
+    const regeneratedPlan = await (runner as any).resolveGovernedPlan(
+      book,
+      tempDir,
+      1,
+      undefined,
+      { reuseExistingIntentWhenContextMissing: true },
+    );
+
+    // Planner was invoked again because cache was properly invalidated!
+    expect(planStructuredCalls).toBe(2);
+    expect(regeneratedPlan.memo.goal).toBe("勘探外围矿道");
+  });
+
+  it("archives existing V3 plan safely into story/runtime/history when authorMind is toggled off", async () => {
+    const runtimeDir = join(tempDir, "story", "runtime");
+    const historyDir = join(runtimeDir, "history");
+    await mkdir(runtimeDir, { recursive: true });
+
+    const v3Plan: PlanChapterOutput = {
+      intent: { chapter: 1, goal: "V3 规划" },
+      memo: { chapter: 1, goal: "V3 规划", body: "正文...", threadRefs: [] },
+      intentMarkdown: "投影",
+      plannerInputs: [],
+      runtimePath: join(runtimeDir, "chapter-0001.intent.md"),
+      creativeContract: {
+        schemaVersion: 1,
+        whyThisChapterExists: { statement: "why" },
+        humanCore: { statement: "core", anchoredInCharacters: ["arthur"] },
+        hardConstraints: [],
+        characterConstraints: [],
+        readerTransition: { desiredAfter: { knows: [], believes: [], suspects: [], expects: [], questions: [], emotionalPosition: [] }, mustRemainUnknown: [] },
+        plannedAuthorIntent: { readerEffects: [], informationStrategy: { reveal: [], withhold: [] }, attentionStrategy: [], emotionalTrajectory: [] },
+        forbiddenShortcuts: [],
+        freedomZone: { mayInvent: [], mayVary: [], mustRemainUnderspecified: [], surpriseAllowed: true },
+      },
+      planningProfile: {
+        authorMindEnabled: true,
+        plannerConfigHash: "config_v3",
+        planningInputHash: "input_v3",
+      },
+    };
+
+    // Save initial V3 plan
+    await savePersistedPlan(tempDir, v3Plan, { authorMindEnabled: true });
+
+    // Now user toggles off authorMind, and runs native planner producing a V2 plan
+    const v2Plan: PlanChapterOutput = {
+      intent: { chapter: 1, goal: "V2 规划" },
+      memo: { chapter: 1, goal: "V2 规划", body: "原生正文...", threadRefs: [] },
+      intentMarkdown: "原生投影",
+      plannerInputs: [],
+      runtimePath: join(runtimeDir, "chapter-0001.intent.md"),
+    };
+
+    // Save V2 plan with downgradePlan: true (or authorMindEnabled: false)
+    await savePersistedPlan(tempDir, v2Plan, { authorMindEnabled: false, downgradePlan: true });
+
+    // 1. Current plan file is now V2
+    const currentPlan = await loadPersistedPlan(tempDir, 1);
+    expect(currentPlan?.creativeContract).toBeUndefined();
+    expect(currentPlan?.memo.goal).toBe("V2 规划");
+
+    // 2. Archive file exists in history directory and contains the original V3 contract!
+    const historyFiles = await readdir(historyDir);
+    expect(historyFiles.length).toBeGreaterThanOrEqual(1);
+    const archiveFile = historyFiles.find((f) => f.startsWith("chapter-0001.plan.author-mind."));
+    expect(archiveFile).toBeDefined();
+
+    const archivedContent = await readFile(join(historyDir, archiveFile!), "utf-8");
+    const archivedJson = JSON.parse(archivedContent);
+    expect(archivedJson.version).toBe(3);
+    expect(archivedJson.creativeContract).toBeDefined();
+    expect(archivedJson.memo.goal).toBe("V3 规划");
   });
 });

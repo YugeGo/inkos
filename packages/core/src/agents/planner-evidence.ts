@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   EvidenceItem,
@@ -46,16 +46,25 @@ export async function buildPlanningEvidenceBundle(params: {
   const characterIdsSet = new Set<string>();
 
   // 1. Authoritative Runtime State & Historical Canon Facts via RuntimeStateStore
+  const stateDir = join(storyDir, "state");
+  const manifestPath = join(stateDir, "manifest.json");
+  let manifestExists = false;
+  try {
+    await stat(manifestPath);
+    manifestExists = true;
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+
   let snapshot: RuntimeStateSnapshot | null = null;
   try {
     snapshot = await loadRuntimeStateSnapshot(params.bookDir);
   } catch (error: any) {
-    const isEnoent = error?.code === "ENOENT" || (typeof error?.message === "string" && error.message.includes("ENOENT"));
-    if (isEnoent) {
+    if (!manifestExists && (error?.code === "ENOENT" || error?.message?.includes("ENOENT"))) {
       // Inception state before runtime state store initialization
       snapshot = null;
     } else {
-      // Authoritative runtime state exists but is corrupted or schema-invalid: Fail-Closed!
+      // Authoritative runtime state exists (or manifest exists) but is corrupted or missing files: Fail-Closed!
       throw new Error(`Authoritative runtime state is invalid or corrupted (Fail-Closed): ${error.message}`);
     }
   }
@@ -84,9 +93,10 @@ export async function buildPlanningEvidenceBundle(params: {
         // Expired fact: past historical reference, never confused with current active truth
         if (canonFacts.length < 30) {
           canonFacts.push({
-            ref: `canon:expired#${factId}`,
+            ref: `canon:expired#${factId}@ch${fact.validUntilChapter}`,
             text: `(历史事实，在第${fact.validUntilChapter}章失效) ${factText}`.slice(0, 500),
             authority: "canon",
+            temporalScope: "historical",
           });
         }
       }
@@ -176,25 +186,7 @@ export async function buildPlanningEvidenceBundle(params: {
     }
   }
 
-  // Also parse book_rules.md if rules.json had no prohibition items
-  if (bookRules.length === 0) {
-    const rulesText = await readTextOrDefault(join(storyDir, "book_rules.md"));
-    if (rulesText.trim()) {
-      const lines = rulesText.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
-      lines.slice(0, 15).forEach((line, idx) => {
-        const text = line.replace(/^[-*]\s*/, "").trim();
-        if (text) {
-          bookRules.push({
-            ref: `rule:r_${String(idx + 1).padStart(2, "0")}`,
-            text: text.slice(0, 500),
-            authority: "book_rule",
-          });
-        }
-      });
-    }
-  }
-
-  // 3. Discover Registered Roles from story/roles directories
+  // 2. Discover Registered Roles from story/roles directories
   for (const tier of ["主要角色", "次要角色", "major", "minor"]) {
     const roleDir = join(storyDir, "roles", tier);
     try {

@@ -33,8 +33,13 @@ import {
   computePlannerConfigHash,
   computePlannerProtocolHash,
   computePlanningInputHash,
+  preparePlanningFingerprint,
+  PLANNER_PROMPT_VERSION,
+  PLANNER_TOOL_VERSION,
   type PlanningProfile,
 } from "../pipeline/persisted-governed-plan.js";
+
+export { PLANNER_PROMPT_VERSION, PLANNER_TOOL_VERSION };
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -53,9 +58,6 @@ export interface PlanChapterOutput {
   readonly creativeContract?: ChapterCreativeContract;
   readonly planningProfile?: PlanningProfile;
 }
-
-export const PLANNER_PROMPT_VERSION = "author-mind-planner-v2";
-export const PLANNER_TOOL_VERSION = 1;
 
 /**
  * The model submits the semantic plan through a typed Pi tool. The host owns
@@ -124,19 +126,21 @@ export class PlannerAgent extends BaseAgent {
     let planningProfile: PlanningProfile | undefined;
 
     if (authorMindEnabled) {
-      const evidenceBundle = await buildPlanningEvidenceBundle({
+      const fingerprint = await preparePlanningFingerprint({
+        book: input.book,
         bookDir: input.bookDir,
         chapterNumber: input.chapterNumber,
-        currentInstruction: input.externalContext,
+        externalContext: input.externalContext,
+        plannerCtx: this.ctx,
       });
 
       const planResult = await this.planGovernedContract({
         chapterNumber: input.chapterNumber,
         contextPackage,
-        evidenceBundle,
+        evidenceBundle: fingerprint.evidenceBundle,
         currentInstruction: input.externalContext,
         language,
-        lengthSpec,
+        lengthSpec: fingerprint.lengthSpec,
       });
 
       memo = planResult.memo;
@@ -144,34 +148,6 @@ export class PlannerAgent extends BaseAgent {
 
       const provider = (this.ctx.client as any).provider ?? "unknown";
       const model = this.ctx.model;
-      const protocolHash = computePlannerProtocolHash({
-        systemPrompt: getAuthorMindPlannerSystemPrompt(language),
-        toolSchema: GovernedPlanContractToolSchema,
-        contractSchemaVersion: creativeContract.schemaVersion,
-        language,
-      });
-      const configHash = computePlannerConfigHash({
-        provider,
-        model,
-        promptVersion: PLANNER_PROMPT_VERSION,
-        toolVersion: PLANNER_TOOL_VERSION,
-        contractSchemaVersion: creativeContract.schemaVersion,
-        authorMindEnabled: true,
-        protocolHash,
-      });
-      const inputHash = computePlanningInputHash({
-        chapterNumber: input.chapterNumber,
-        evidenceBundle,
-        currentInstruction: input.externalContext,
-        externalContext: input.externalContext,
-        taskGoal,
-        lengthBudget: {
-          target: lengthSpec.target,
-          unit: lengthSpec.countingMode === "en_words" ? "words" : "字",
-        },
-        previousEndingExcerpt: seedMaterials.previousEndingExcerpt,
-        selectedSources: plannerInputs,
-      });
 
       planningProfile = {
         authorMindEnabled: true,
@@ -180,9 +156,9 @@ export class PlannerAgent extends BaseAgent {
         plannerToolVersion: PLANNER_TOOL_VERSION,
         plannerProvider: provider,
         plannerModel: model,
-        plannerConfigHash: configHash,
-        planningInputHash: inputHash,
-        plannerProtocolHash: protocolHash,
+        plannerConfigHash: fingerprint.configHash,
+        planningInputHash: fingerprint.inputHash,
+        plannerProtocolHash: fingerprint.protocolHash,
       };
 
       // Persist Markdown projection for creative contract

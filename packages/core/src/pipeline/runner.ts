@@ -59,6 +59,7 @@ import {
   computePlannerConfigHash,
   computePlannerProtocolHash,
   computePlanningInputHash,
+  preparePlanningFingerprint,
   isPersistedPlanReusable,
   loadPersistedPlan,
   relativeToBookDir,
@@ -2191,35 +2192,15 @@ export class PipelineRunner {
 
         if (authorMindEnabled) {
           const plannerCtx = this.agentCtxFor("planner", book.id);
-          const provider = (plannerCtx.client as any).provider ?? "unknown";
-          const model = plannerCtx.model;
-          const language = book.language ?? "zh";
-          const protocolHash = computePlannerProtocolHash({
-            systemPrompt: getAuthorMindPlannerSystemPrompt(language),
-            toolSchema: GovernedPlanContractToolSchema,
-            contractSchemaVersion: 1,
-            language,
-          });
-          expectedConfigHash = computePlannerConfigHash({
-            provider,
-            model,
-            promptVersion: PLANNER_PROMPT_VERSION,
-            toolVersion: PLANNER_TOOL_VERSION,
-            contractSchemaVersion: 1,
-            authorMindEnabled: true,
-            protocolHash,
-          });
-
-          const evidenceBundle = await buildPlanningEvidenceBundle({
+          const fingerprint = await preparePlanningFingerprint({
+            book,
             bookDir,
             chapterNumber,
-            currentInstruction: externalContext,
-          });
-          expectedInputHash = computePlanningInputHash({
-            chapterNumber,
-            evidenceBundle,
             externalContext,
+            plannerCtx,
           });
+          expectedConfigHash = fingerprint.configHash;
+          expectedInputHash = fingerprint.inputHash;
         }
 
         const { reusable } = isPersistedPlanReusable(persisted, {

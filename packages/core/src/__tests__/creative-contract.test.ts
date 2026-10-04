@@ -522,6 +522,87 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(invalidResult.errors.some((e) => e.code === "INVALID_AUTHOR_INSTRUCTION_AUTHORITY")).toBe(true);
   });
 
+  it("enforces strict provenance: rejects missing sourceRef for world/author, rejects hook as world truth, and rejects expired facts as canon constraints", () => {
+    const bundleWithHistorical: PlanningEvidenceBundle = {
+      ...sampleEvidenceBundle,
+      canonFacts: [
+        ...sampleEvidenceBundle.canonFacts,
+        {
+          ref: "canon:expired#flashlight.battery@ch0",
+          text: "手电筒没电",
+          authority: "canon",
+          temporalScope: "historical",
+        },
+      ],
+    };
+
+    // 1. World constraint without sourceRef
+    const worldWithoutRef: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_world_missing_ref",
+          statement: "泵房大门只能从外面打开",
+          source: "world",
+          priority: "absolute",
+        },
+      ],
+    };
+    const res1 = validateCreativeContractSemantics(worldWithoutRef, bundleWithHistorical);
+    expect(res1.ok).toBe(false);
+    expect(res1.errors.some((e) => e.code === "MISSING_WORLD_SOURCEREF")).toBe(true);
+
+    // 2. World constraint citing active hook
+    const worldWithHook: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_world_with_hook",
+          statement: "副官口袋里揣着维修单",
+          source: "world",
+          sourceRef: "hook:hk_subordinate_secret",
+          priority: "absolute",
+        },
+      ],
+    };
+    const res2 = validateCreativeContractSemantics(worldWithHook, bundleWithHistorical);
+    expect(res2.ok).toBe(false);
+    expect(res2.errors.some((e) => e.code === "HOOK_AS_WORLD_REALITY")).toBe(true);
+
+    // 3. Author constraint without sourceRef
+    const authorWithoutRef: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_author_missing_ref",
+          statement: "本章必须杀掉配角",
+          source: "author",
+          priority: "strong",
+        },
+      ],
+    };
+    const res3 = validateCreativeContractSemantics(authorWithoutRef, bundleWithHistorical);
+    expect(res3.ok).toBe(false);
+    expect(res3.errors.some((e) => e.code === "MISSING_AUTHOR_SOURCEREF")).toBe(true);
+
+    // 4. Canon constraint citing expired historical fact
+    const canonWithExpired: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_canon_expired",
+          statement: "手电筒处于完全没电状态",
+          source: "canon",
+          sourceRef: "canon:expired#flashlight.battery@ch0",
+          priority: "absolute",
+        },
+      ],
+    };
+    const res4 = validateCreativeContractSemantics(canonWithExpired, bundleWithHistorical);
+    expect(res4.ok).toBe(false);
+    expect(res4.errors.some((e) => e.code === "HISTORICAL_CANON_CONFUSION")).toBe(true);
+  });
+
   it("non-destructively preserves existing V3 contract and maintains immutable generation provenance even under runtime authorMindEnabled: false", async () => {
     const planWithContract: PlanChapterOutput = {
       intent: { chapter: 3, goal: "已有 V3 计划" },

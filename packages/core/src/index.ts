@@ -190,6 +190,10 @@ export {
   type EvidenceAuthority,
   type EvidenceItem,
   type PlanningEvidenceBundle,
+  lookupEvidenceRecord,
+  EvidenceTemporalScopeSchema,
+  type EvidenceCategory,
+  type EvidenceTemporalScope,
   type ConstraintPressure,
   type ConstraintPressureLevel,
   type ContractValidationResult,
@@ -203,12 +207,16 @@ export {
   computePlannerConfigHash,
   computePlannerProtocolHash,
   computePlanningInputHash,
+  preparePlanningFingerprint,
+  computeRelevantSourcesChecksum,
+  computeSkillsFingerprint,
   isPersistedPlanReusable,
   savePersistedPlan,
   loadPersistedPlan,
   type PersistedPlan,
   type PlanningProfile,
   type PlanReusabilityCheckOptions,
+  type PreparedPlanningFingerprint,
 } from "./pipeline/persisted-governed-plan.js";
 
 export {
