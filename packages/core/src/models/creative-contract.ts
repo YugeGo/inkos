@@ -70,16 +70,39 @@ export const ReaderStateSchema = z.object({
 }).strict();
 export type ReaderState = z.infer<typeof ReaderStateSchema>;
 
-/** Hard constraint with a stable ID, source provenance, and priority for automated auditing */
-export const HardConstraintSchema = z.object({
-  id: z.string().min(1).max(64),
-  statement: z.string().min(1).max(500),
-  source: ConstraintSourceSchema,
-  sourceRef: z.string().min(1).max(256).optional(),
-  priority: ConstraintPrioritySchema.default("absolute"),
-  severity: ConstraintPrioritySchema.optional(),
-}).strict();
+/**
+ * Hard constraint with a stable ID, source provenance, and priority for automated auditing.
+ * Preprocesses legacy 'severity' into canonical 'priority', strictly ensuring no duplicate
+ * or conflicting priority/severity fields exist in the canonical contract.
+ */
+export const HardConstraintSchema = z.preprocess(
+  (val: unknown) => {
+    if (val && typeof val === "object") {
+      const record = val as Record<string, unknown>;
+      if ("severity" in record && !("priority" in record)) {
+        const { severity, ...rest } = record;
+        return {
+          ...rest,
+          priority: severity,
+        };
+      }
+      if ("severity" in record && "priority" in record) {
+        const { severity: _, ...rest } = record;
+        return rest;
+      }
+    }
+    return val;
+  },
+  z.object({
+    id: z.string().min(1).max(64),
+    statement: z.string().min(1).max(500),
+    source: ConstraintSourceSchema,
+    sourceRef: z.string().min(1).max(256).optional(),
+    priority: ConstraintPrioritySchema.default("absolute"),
+  }).strict(),
+);
 export type HardConstraint = z.infer<typeof HardConstraintSchema>;
+
 
 /**
  * Character cognitive and psychological boundaries.
@@ -471,17 +494,52 @@ export function validateCreativeContractSemantics(
               message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}" not in PlanningEvidenceBundle.`,
               code: "UNVERIFIED_EVIDENCE_REFERENCE",
             });
-          } else if (evidence.authority === "outline") {
-            // Outline intentions are future hopes, NOT established canon reality!
+          } else if (evidence.authority !== "canon") {
+            // Strict Canon boundary check!
             errors.push({
               path: `hardConstraints[${i}].sourceRef`,
-              message: `Hard constraint "${hc.id}" attempts to treat outline intention "${hc.sourceRef}" as canon reality. Outline is not established canon.`,
+              message: `Hard constraint "${hc.id}" claims source "canon" but references evidence "${hc.sourceRef}" with authority "${evidence.authority}". Only verified canon facts are valid for canon constraints.`,
+              code: evidence.authority === "outline" ? "OUTLINE_CANON_CONFUSION" : "INVALID_CANON_AUTHORITY",
+            });
+          }
+        }
+      } else if (hc.source === "world") {
+        if (hc.sourceRef) {
+          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
+          if (!evidence) {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" references unverified evidence "${hc.sourceRef}" not in PlanningEvidenceBundle.`,
+              code: "UNVERIFIED_EVIDENCE_REFERENCE",
+            });
+          } else if (evidence.authority === "outline") {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" attempts to treat outline intention "${hc.sourceRef}" as world reality.`,
               code: "OUTLINE_CANON_CONFUSION",
+            });
+          }
+        }
+      } else if (hc.source === "author") {
+        if (hc.sourceRef) {
+          const evidence = lookupEvidenceRef(bundle, hc.sourceRef);
+          if (!evidence) {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" references unverified author instruction "${hc.sourceRef}".`,
+              code: "UNVERIFIED_EVIDENCE_REFERENCE",
+            });
+          } else if (evidence.authority !== "author_instruction") {
+            errors.push({
+              path: `hardConstraints[${i}].sourceRef`,
+              message: `Hard constraint "${hc.id}" claims source "author" but references evidence "${hc.sourceRef}" with authority "${evidence.authority}".`,
+              code: "INVALID_AUTHOR_INSTRUCTION_AUTHORITY",
             });
           }
         }
       }
     }
+
 
     // Validate characters belong to known characterIds
     const knownChars = new Set(bundle.characterIds);

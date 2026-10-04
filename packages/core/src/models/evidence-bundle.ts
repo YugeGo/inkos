@@ -33,6 +33,7 @@ export const PlanningEvidenceBundleSchema = z.object({
   bookRules: z.array(EvidenceItemSchema).max(30),
   activeHooks: z.array(EvidenceItemSchema).max(30),
   outlineIntentions: z.array(EvidenceItemSchema).max(30),
+  authorInstructions: z.array(EvidenceItemSchema).max(30),
   characterIds: z.array(z.string().min(1).max(64)).max(50),
 }).strict();
 export type PlanningEvidenceBundle = z.infer<typeof PlanningEvidenceBundleSchema>;
@@ -41,7 +42,7 @@ export type PlanningEvidenceBundle = z.infer<typeof PlanningEvidenceBundleSchema
  * Helper to check if an authority classification represents verified canon reality.
  */
 export function isCanonAuthority(authority: EvidenceAuthority): boolean {
-  return authority === "canon" || authority === "runtime_state" || authority === "book_rule";
+  return authority === "canon";
 }
 
 /**
@@ -63,5 +64,9 @@ export function lookupEvidenceRef(bundle: PlanningEvidenceBundle, ref: string): 
   for (const item of bundle.outlineIntentions) {
     if (item.ref === ref) return item;
   }
+  for (const item of bundle.authorInstructions) {
+    if (item.ref === ref) return item;
+  }
   return undefined;
 }
+

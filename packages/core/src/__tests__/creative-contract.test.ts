@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   ChapterCreativeContractSchema,
+  HardConstraintSchema,
   type ChapterCreativeContract,
   PersistedPlanSchema,
+
   savePersistedPlan,
   loadPersistedPlan,
   InferredAuthorIntentHypothesisSchema,
@@ -46,11 +48,12 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
       {
         id: "hc_console_inactive",
         statement: "主控台必须保持离线无响应状态，禁止自行通电恢复。",
-        source: "canon",
+        source: "world",
         sourceRef: "state:current_state.json#console.status",
         priority: "absolute",
       },
     ],
+
     characterConstraints: [
       {
         characterId: "arthur",
@@ -167,8 +170,16 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
         authority: "outline",
       },
     ],
+    authorInstructions: [
+      {
+        ref: "instruction:focus_on_details",
+        text: "重点描写泵房仪表的机械指针与微小漏油",
+        authority: "author_instruction",
+      },
+    ],
     characterIds: ["arthur", "clara", "deputy"],
   };
+
 
   it("validates a fully formed ChapterCreativeContract with InformationTarget and priority", () => {
     const parsed = ChapterCreativeContractSchema.parse(validContract);
@@ -455,7 +466,63 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(loaded!.planningProfile?.plannerConfigHash).toBeTruthy();
   });
 
-  it("non-destructively preserves existing V3 contract even when authorMindEnabled is false unless downgradePlan is set", async () => {
+  it("migrates legacy severity: 'strong' into priority: 'strong' and strictly eliminates severity from canonical contract", () => {
+    const legacyHardConstraint = {
+      id: "hc_legacy",
+      statement: "旧版约束定义",
+      source: "canon",
+      severity: "strong", // Legacy field
+    };
+
+    const parsed = HardConstraintSchema.parse(legacyHardConstraint);
+    expect(parsed.priority).toBe("strong");
+    expect("severity" in (parsed as any)).toBe(false);
+
+    const contractWithLegacy = {
+      ...validContract,
+      hardConstraints: [legacyHardConstraint as any],
+    };
+    const parsedContract = ChapterCreativeContractSchema.parse(contractWithLegacy);
+    expect(parsedContract.hardConstraints[0].priority).toBe("strong");
+    expect("severity" in (parsedContract.hardConstraints[0] as any)).toBe(false);
+  });
+
+  it("validates authorInstructions evidence and rejects invalid authority references", () => {
+    const validAuthorConstraint: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_author_rule",
+          statement: "重点描写泵房细节",
+          source: "author",
+          sourceRef: "instruction:focus_on_details",
+          priority: "strong",
+        },
+      ],
+    };
+
+    const validResult = validateCreativeContractSemantics(validAuthorConstraint, sampleEvidenceBundle);
+    expect(validResult.ok).toBe(true);
+
+    const invalidAuthorConstraint: ChapterCreativeContract = {
+      ...validContract,
+      hardConstraints: [
+        {
+          id: "hc_author_rule_invalid",
+          statement: "尝试用已发生既定事实作为作者即时指令",
+          source: "author",
+          sourceRef: "canon:pump_room_built", // Canon is NOT author_instruction!
+          priority: "strong",
+        },
+      ],
+    };
+
+    const invalidResult = validateCreativeContractSemantics(invalidAuthorConstraint, sampleEvidenceBundle);
+    expect(invalidResult.ok).toBe(false);
+    expect(invalidResult.errors.some((e) => e.code === "INVALID_AUTHOR_INSTRUCTION_AUTHORITY")).toBe(true);
+  });
+
+  it("non-destructively preserves existing V3 contract and maintains immutable generation provenance even under runtime authorMindEnabled: false", async () => {
     const planWithContract: PlanChapterOutput = {
       intent: { chapter: 3, goal: "已有 V3 计划" },
       memo: {
@@ -468,18 +535,27 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
       plannerInputs: [],
       runtimePath: join(tempDir, "story", "runtime", "chapter-0003.intent.md"),
       creativeContract: validContract,
+      planningProfile: {
+        authorMindEnabled: true,
+        plannerProvider: "anthropic",
+        plannerModel: "claude-3-7-sonnet",
+        plannerConfigHash: "immutable_hash_1",
+      },
     };
 
     const runtimeDir = join(tempDir, "story", "runtime");
     await mkdir(runtimeDir, { recursive: true });
 
-    // Normal save with authorMindEnabled: false (flag disabled, but contract exists)
+    // Normal save with authorMindEnabled: false (runtime consumption disabled)
     await savePersistedPlan(tempDir, planWithContract, { authorMindEnabled: false });
 
     // Should NOT destroy the contract; stays V3
     const savedNormally = await loadPersistedPlan(tempDir, 3);
     expect(savedNormally!.creativeContract).toBeDefined();
-    expect(savedNormally!.planningProfile?.authorMindEnabled).toBe(false);
+    // Generation provenance remains immutable (true, not mutated to false)
+    expect(savedNormally!.planningProfile?.authorMindEnabled).toBe(true);
+    expect(savedNormally!.planningProfile?.plannerProvider).toBe("anthropic");
+    expect(savedNormally!.planningProfile?.plannerConfigHash).toBe("immutable_hash_1");
 
     // Explicit downgrade destroys the contract and reverts to V2
     await savePersistedPlan(tempDir, planWithContract, { downgradePlan: true });
@@ -488,3 +564,4 @@ describe("ChapterCreativeContract Schema & PersistedPlan V2/V3 Compatibility", (
     expect(downgraded!.planningProfile).toBeUndefined();
   });
 });
+

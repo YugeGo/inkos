@@ -96,26 +96,31 @@ export async function savePersistedPlan(
     readonly downgradePlan?: boolean;
   },
 ): Promise<void> {
-  const authorMindEnabled = options?.authorMindEnabled ?? (plan.planningProfile?.authorMindEnabled ?? Boolean(plan.creativeContract));
+  const hasExistingContract = Boolean(plan.creativeContract);
+  const runtimeAuthorMindEnabled = options?.authorMindEnabled ?? (plan.planningProfile?.authorMindEnabled ?? hasExistingContract);
   
-  // Non-destructive preservation: An existing contract in V3 is preserved even if authorMind is disabled,
+  // Non-destructive preservation: An existing contract in V3 is preserved even if runtime authorMind is disabled,
   // unless caller explicitly passes downgradePlan: true.
-  const shouldSaveV3 = !options?.downgradePlan && (Boolean(plan.creativeContract) || authorMindEnabled);
+  const shouldSaveV3 = !options?.downgradePlan && (hasExistingContract || runtimeAuthorMindEnabled);
 
   let value: PersistedPlan;
   if (shouldSaveV3) {
-    const contractSchemaVersion = plan.creativeContract ? plan.creativeContract.schemaVersion : plan.planningProfile?.contractSchemaVersion;
-    const promptVersion = options?.plannerPromptVersion ?? plan.planningProfile?.plannerPromptVersion;
-    const toolVersion = options?.plannerToolVersion ?? plan.planningProfile?.plannerToolVersion;
-    const provider = options?.plannerProvider ?? plan.planningProfile?.plannerProvider;
-    const model = options?.plannerModel ?? plan.planningProfile?.plannerModel;
-    const configHash = computePlannerConfigHash({
+    // Planning profile represents IMMUTABLE generation provenance, not current transient consumption flags.
+    // If the plan already has a planningProfile, preserve its original generation facts intact.
+    const originalProfile = plan.planningProfile;
+    const authorMindProvenance = originalProfile?.authorMindEnabled ?? runtimeAuthorMindEnabled;
+    const contractSchemaVersion = plan.creativeContract ? plan.creativeContract.schemaVersion : originalProfile?.contractSchemaVersion;
+    const promptVersion = originalProfile?.plannerPromptVersion ?? options?.plannerPromptVersion;
+    const toolVersion = originalProfile?.plannerToolVersion ?? options?.plannerToolVersion;
+    const provider = originalProfile?.plannerProvider ?? options?.plannerProvider;
+    const model = originalProfile?.plannerModel ?? options?.plannerModel;
+    const configHash = originalProfile?.plannerConfigHash ?? computePlannerConfigHash({
       provider,
       model,
       promptVersion,
       toolVersion,
       contractSchemaVersion,
-      authorMindEnabled,
+      authorMindEnabled: authorMindProvenance,
     });
 
     value = PersistedPlanV3Schema.parse({
@@ -124,7 +129,7 @@ export async function savePersistedPlan(
       memo: plan.memo,
       ...(plan.creativeContract ? { creativeContract: plan.creativeContract } : {}),
       planningProfile: {
-        authorMindEnabled,
+        authorMindEnabled: authorMindProvenance,
         ...(contractSchemaVersion ? { contractSchemaVersion } : {}),
         ...(promptVersion ? { plannerPromptVersion: promptVersion } : {}),
         ...(toolVersion ? { plannerToolVersion: toolVersion } : {}),
@@ -144,6 +149,7 @@ export async function savePersistedPlan(
   }
   await writeFile(planPath(bookDir, plan.memo.chapter), `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
+
 
 
 export async function loadPersistedPlan(
