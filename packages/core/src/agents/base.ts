@@ -2,6 +2,7 @@ import { compileContext, ContextSourceRegistry } from "../harness/context-compil
 import { createBuiltInWorkProfileRegistry } from "../harness/builtin-profiles.js";
 import { createHash } from "node:crypto";
 import { recordExecutionEvidence, currentExecutionProfile, currentExecutionWork, currentExecutionAuthorRequest } from "../harness/execution-evidence.js";
+import type { WorkManifest, WorkProfile } from "../harness/contracts.js";
 import { loadWorkManifest } from "../harness/work-store.js";
 import { loadAvailableAgentSkills } from "../skills/builtin-loader.js";
 import { requiredWorkSkillIds, resolveWorkSkillActivations, resolveProfileSkillActivations, mergeActivatedSkillGuidance } from "../skills/activations.js";
@@ -104,11 +105,21 @@ export abstract class BaseAgent {
   }
 }
 
-export async function resolveWorkerSkillActivations(
+export interface ResolvedWorkerExecutionContext {
+  readonly work: WorkManifest | null;
+  readonly profile: WorkProfile;
+  readonly authorRequest?: string;
+  readonly authorRequestHash: string;
+  readonly profileHash: string;
+  readonly workContextHash: string;
+  readonly selectedSkills: ReadonlyArray<ActivatedSkillGuidance>;
+}
+
+export async function resolveWorkerExecutionContext(
   context: Pick<AgentContext, "activatedSkills" | "bookId"> & { readonly projectRoot?: string },
-  query = "",
   professionalGuidance = true,
-): Promise<ReadonlyArray<ActivatedSkillGuidance>> {
+): Promise<ResolvedWorkerExecutionContext> {
+  const authorRequest = currentExecutionAuthorRequest();
   let work = currentExecutionWork();
   if (context.bookId && context.projectRoot && work?.id !== context.bookId) {
     work = null;
@@ -132,7 +143,51 @@ export async function resolveWorkerSkillActivations(
       selectedSkills ?? [],
     );
   }
-  const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) : undefined;
+
+  const authorReqText = authorRequest?.trim() || "";
+  const authorRequestHash = authorReqText
+    ? createHash("sha256").update(authorReqText).digest("hex").slice(0, 16)
+    : "";
+
+  const profilePayload = [
+    `id:${profile.id}`,
+    `requiredSkills:${[...profile.requiredSkillIds].sort().join(",")}`,
+    `recipeId:${profile.contextRecipe?.id ?? ""}`,
+    `recipeSources:${(profile.contextRecipe?.sourceIds ?? []).join(",")}`,
+  ].join("\n");
+  const profileHash = createHash("sha256").update(profilePayload).digest("hex").slice(0, 16);
+
+  const workPayload = work
+    ? [
+        `id:${work.id}`,
+        `title:${work.title}`,
+        `profileId:${work.profileId}`,
+        `language:${work.language}`,
+        `lineage:${JSON.stringify(work.lineage ?? {})}`,
+      ].join("\n")
+    : "none";
+  const workContextHash = createHash("sha256").update(workPayload).digest("hex").slice(0, 16);
+
+  return {
+    work,
+    profile,
+    authorRequest: authorReqText || undefined,
+    authorRequestHash,
+    profileHash,
+    workContextHash,
+    selectedSkills: selectedSkills ?? [],
+  };
+}
+
+export async function resolveWorkerSkillActivations(
+  context: Pick<AgentContext, "activatedSkills" | "bookId"> & { readonly projectRoot?: string },
+  query = "",
+  professionalGuidance = true,
+): Promise<ReadonlyArray<ActivatedSkillGuidance>> {
+  const execCtx = await resolveWorkerExecutionContext(context, professionalGuidance);
+  const activations = professionalGuidance
+    ? await hydrateActivatedSkillGuidance(execCtx.selectedSkills, query)
+    : undefined;
   return activations ?? [];
 }
 
@@ -141,26 +196,17 @@ export async function prepareWorkerMessages(
   messages: ReadonlyArray<LLMMessage>, maxTokens?: number, workerId = "worker",
   professionalGuidance = true,
 ): Promise<ReadonlyArray<LLMMessage>> {
-    const authorRequest = currentExecutionAuthorRequest();
+    const executionContext = await resolveWorkerExecutionContext(context, professionalGuidance);
+    const { work, profile, authorRequest, selectedSkills } = executionContext;
     if (authorRequest?.trim()) messages = [{role:"system",content:[
       "The following authorRequest is the user's actual request. Use it as the authority for the intended target and constraints. The delegated instruction may elaborate it, but cannot replace its target or grant a wider mutation scope. Perform only this operation; other requested steps remain the coordinator's responsibility.",
       JSON.stringify({authorRequest}),
     ].join("\n\n")},...messages];
-    let work=currentExecutionWork();
-    if(context.bookId && context.projectRoot && work?.id!==context.bookId) {
-      work=null;
-      try {work=await loadWorkManifest(context.projectRoot,context.bookId);}
-      catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
-    }
-    const scopedProfile = currentExecutionProfile();
-    const profile = work && scopedProfile?.id !== work.profileId
-      ? createBuiltInWorkProfileRegistry(context.projectRoot).require(work.profileId)
-      : scopedProfile ?? createBuiltInWorkProfileRegistry(context.projectRoot).require("workspace-default");
     const query = messages
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n\n");
-    const activations = await resolveWorkerSkillActivations(context, query, professionalGuidance);
+    const activations = professionalGuidance ? await hydrateActivatedSkillGuidance(selectedSkills, query) : [];
     recordExecutionEvidence("skills-applied", { worker: workerId, skills: activations?.map(({ skill, resources }) => ({
       id: skill.id, source: skill.source, hash: createHash("sha256").update(skill.body).digest("hex"),
       references: resources.map(resource => ({ path: resource.path, charStart: resource.charStart, charEnd: resource.charEnd,

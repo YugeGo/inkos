@@ -260,7 +260,7 @@ export async function loadLinkedSkillResources(skill: AgentSkill): Promise<Activ
   }));
 }
 
-async function listSkillTextFiles(root: string, current = root): Promise<string[]> {
+export async function listSkillTextFiles(root: string, current = root): Promise<string[]> {
   const files: string[] = [];
   for (const entry of await readdir(current, { withFileTypes: true })) {
     const fullPath = join(current, entry.name);

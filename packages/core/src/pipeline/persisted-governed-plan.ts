@@ -4,8 +4,15 @@ import { z } from "zod";
 import type { PlanChapterOutput } from "../agents/planner.js";
 import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import type { BookConfig } from "../models/book.js";
-import { type AgentContext, resolveWorkerSkillActivations } from "../agents/base.js";
-import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
+import {
+  type AgentContext,
+  resolveWorkerSkillActivations,
+  resolveWorkerExecutionContext,
+} from "../agents/base.js";
+import {
+  type ActivatedSkillGuidance,
+  listSkillTextFiles,
+} from "../agent/skill-tool.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
 import { loadPlanningSeedMaterials, type PlanningSeedMaterials } from "../utils/planning-materials.js";
@@ -36,6 +43,7 @@ export function computePlannerProtocolHash(params: {
   readonly contractSchemaVersion: number;
   readonly language: string;
   readonly skillFingerprint?: string;
+  readonly profileHash?: string;
 }): string {
   const content = [
     params.systemPrompt,
@@ -43,6 +51,7 @@ export function computePlannerProtocolHash(params: {
     String(params.contractSchemaVersion),
     params.language,
     params.skillFingerprint ?? "",
+    params.profileHash ?? "",
   ].join(":::");
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
@@ -60,6 +69,7 @@ export function computePlannerConfigHash(params: {
   readonly contractSchemaVersion?: number;
   readonly authorMindEnabled: boolean;
   readonly protocolHash?: string;
+  readonly workContextHash?: string;
 }): string {
   const payload = JSON.stringify({
     provider: params.provider ?? "",
@@ -70,6 +80,7 @@ export function computePlannerConfigHash(params: {
     contractSchemaVersion: params.contractSchemaVersion ?? 0,
     authorMindEnabled: params.authorMindEnabled,
     protocolHash: params.protocolHash ?? "",
+    workContextHash: params.workContextHash ?? "",
   });
   return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
@@ -79,6 +90,10 @@ export interface PlanningInputFingerprintData {
   readonly evidenceBundle: PlanningEvidenceBundle;
   readonly currentInstruction?: string;
   readonly externalContext?: string;
+  readonly authorRequest?: string;
+  readonly authorRequestHash?: string;
+  readonly profileHash?: string;
+  readonly workContextHash?: string;
   readonly taskGoal?: string;
   readonly lengthBudget?: { target: number; unit: string };
   readonly previousEndingExcerpt?: string;
@@ -112,6 +127,18 @@ export function computePlanningInputHash(
   }
   if (data.externalContext) {
     lines.push(`meta|externalContext|${data.externalContext.trim()}`);
+  }
+  if (data.authorRequest) {
+    lines.push(`meta|authorRequest|${data.authorRequest.trim()}`);
+  }
+  if (data.authorRequestHash) {
+    lines.push(`meta|authorRequestHash|${data.authorRequestHash}`);
+  }
+  if (data.profileHash) {
+    lines.push(`meta|profileHash|${data.profileHash}`);
+  }
+  if (data.workContextHash) {
+    lines.push(`meta|workContextHash|${data.workContextHash}`);
   }
   if (data.taskGoal) {
     lines.push(`meta|taskGoal|${data.taskGoal.trim()}`);
@@ -228,11 +255,12 @@ export async function computeRelevantSourcesChecksum(
 
 /**
  * Computes deterministic content fingerprint across activated skills,
- * including skill body, resource paths, offsets, and resource content hashes.
+ * including skill body, complete skill directory corpus (.md and .txt files),
+ * and dynamically activated resource snippets.
  */
-export function computeSkillsFingerprint(
+export async function computeSkillsFingerprint(
   skills?: ReadonlyArray<ActivatedSkillGuidance | { name: string; guidance?: string }>,
-): string {
+): Promise<string> {
   if (!skills || skills.length === 0) return "";
   const lines: string[] = [];
   for (const item of skills) {
@@ -241,6 +269,25 @@ export function computeSkillsFingerprint(
       const skillName = item.skill.name;
       const skillBody = item.skill.body?.trim() || item.skill.description || "";
       const skillBodyHash = createHash("sha256").update(skillBody).digest("hex").slice(0, 16);
+
+      const fileEntries: string[] = [];
+      if (item.skill.baseDir) {
+        try {
+          const files = await listSkillTextFiles(item.skill.baseDir);
+          for (const relPath of files) {
+            try {
+              const fullPath = join(item.skill.baseDir, relPath);
+              const content = await readFile(fullPath, "utf-8");
+              const hash = createHash("sha256").update(content).digest("hex").slice(0, 16);
+              fileEntries.push(`${relPath}:${hash}`);
+            } catch (err: any) {
+              if (err?.code !== "ENOENT") throw err;
+            }
+          }
+        } catch (err: any) {
+          if (err?.code !== "ENOENT") throw err;
+        }
+      }
 
       const resourceLines: string[] = [];
       const resources = [...(item.resources ?? [])].sort((a, b) => {
@@ -254,7 +301,9 @@ export function computeSkillsFingerprint(
         resourceLines.push(`${res.path}:${res.charStart}:${res.charEnd}:${resBodyHash}`);
       }
 
-      lines.push(`skill|${skillId}|${skillName}|${skillBodyHash}|${resourceLines.join(";")}`);
+      lines.push(
+        `skill|${skillId}|${skillName}|${skillBodyHash}|corpus:${fileEntries.join(";")}|dynamic:${resourceLines.join(";")}`
+      );
     } else {
       const name = item.name;
       const guidanceHash = createHash("sha256").update(item.guidance ?? "").digest("hex").slice(0, 16);
@@ -315,8 +364,9 @@ export async function preparePlanningFingerprint(params: {
   const provider = client?.provider ?? "unknown";
   const service = client?.service ?? client?.config?.service ?? "";
   const model = params.plannerCtx.model;
-  const resolvedSkills = await resolveWorkerSkillActivations(params.plannerCtx, taskGoal, true);
-  const skillFingerprint = computeSkillsFingerprint(resolvedSkills);
+
+  const execCtx = await resolveWorkerExecutionContext(params.plannerCtx, true);
+  const skillFingerprint = await computeSkillsFingerprint(execCtx.selectedSkills);
 
   const protocolHash = computePlannerProtocolHash({
     systemPrompt: getAuthorMindPlannerSystemPrompt(language),
@@ -324,6 +374,7 @@ export async function preparePlanningFingerprint(params: {
     contractSchemaVersion: 1,
     language,
     skillFingerprint,
+    profileHash: execCtx.profileHash,
   });
 
   const configHash = computePlannerConfigHash({
@@ -335,6 +386,7 @@ export async function preparePlanningFingerprint(params: {
     contractSchemaVersion: 1,
     authorMindEnabled: true,
     protocolHash,
+    workContextHash: execCtx.workContextHash,
   });
 
   const relevantSourceChecksums = await computeRelevantSourcesChecksum(params.bookDir);
@@ -344,6 +396,10 @@ export async function preparePlanningFingerprint(params: {
     evidenceBundle,
     currentInstruction: params.externalContext,
     externalContext: params.externalContext,
+    authorRequest: execCtx.authorRequest,
+    authorRequestHash: execCtx.authorRequestHash,
+    profileHash: execCtx.profileHash,
+    workContextHash: execCtx.workContextHash,
     taskGoal,
     lengthBudget: {
       target: lengthSpec.target,

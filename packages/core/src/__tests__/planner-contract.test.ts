@@ -13,6 +13,7 @@ import {
   computePlannerProtocolHash,
   computePlanningInputHash,
   computeRelevantSourcesChecksum,
+  computeSkillsFingerprint,
   preparePlanningFingerprint,
   resolveAuthorMindEnabled,
   savePersistedPlan,
@@ -1133,6 +1134,12 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     const arthurChecksumBefore = checksumsBefore.find((c) => c.path.includes("Arthur.md"));
     expect(arthurChecksumBefore).toBeDefined();
 
+    const inputHashBefore = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      relevantSourceChecksums: checksumsBefore,
+    });
+
     // Modify Arthur.md content
     await writeFile(join(rolesDir, "Arthur.md"), "# Arthur\n此时决定主动信任 Clara。", "utf-8");
 
@@ -1140,6 +1147,13 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     const arthurChecksumAfter = checksumsAfter.find((c) => c.path.includes("Arthur.md"));
     expect(arthurChecksumAfter).toBeDefined();
     expect(arthurChecksumAfter?.hash).not.toBe(arthurChecksumBefore?.hash);
+
+    const inputHashAfter = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      relevantSourceChecksums: checksumsAfter,
+    });
+    expect(inputHashAfter).not.toBe(inputHashBefore);
   });
 
   it("invalidates planningInputHash when style_guide.md is modified", async () => {
@@ -1151,11 +1165,101 @@ describe("Phase 2: Planner Integration & Contract Governance", () => {
     const styleChecksumBefore = checksumsBefore.find((c) => c.path === "style_guide.md");
     expect(styleChecksumBefore).toBeDefined();
 
+    const inputHashBefore = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      relevantSourceChecksums: checksumsBefore,
+    });
+
     await writeFile(join(storyDir, "style_guide.md"), "风格：严肃写实，增加黑色幽默与讽刺", "utf-8");
     const checksumsAfter = await computeRelevantSourcesChecksum(tempDir);
     const styleChecksumAfter = checksumsAfter.find((c) => c.path === "style_guide.md");
     expect(styleChecksumAfter).toBeDefined();
     expect(styleChecksumAfter?.hash).not.toBe(styleChecksumBefore?.hash);
+
+    const inputHashAfter = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      relevantSourceChecksums: checksumsAfter,
+    });
+    expect(inputHashAfter).not.toBe(inputHashBefore);
+  });
+
+  it("invalidates plannerProtocolHash and plannerConfigHash when skill corpus reference file is modified", async () => {
+    const skillDir = join(tempDir, "test-skill");
+    const refDir = join(skillDir, "references");
+    await mkdir(refDir, { recursive: true });
+    await writeFile(join(skillDir, "SKILL.md"), "# Test Skill\nSkill body", "utf-8");
+    await writeFile(join(refDir, "guide.md"), "Original reference guide", "utf-8");
+
+    const activatedSkills = [
+      {
+        skill: {
+          id: "test-skill",
+          name: "Test Skill",
+          description: "Test description",
+          source: "project" as const,
+          body: "# Test Skill\nSkill body",
+          baseDir: skillDir,
+        },
+        resources: [],
+      },
+    ];
+
+    const skillFingerprintBefore = await computeSkillsFingerprint(activatedSkills);
+    const protocolHashBefore = computePlannerProtocolHash({
+      systemPrompt: "system prompt",
+      toolSchema: {},
+      contractSchemaVersion: 1,
+      language: "zh",
+      skillFingerprint: skillFingerprintBefore,
+      profileHash: "prof_hash_1",
+    });
+    const configHashBefore = computePlannerConfigHash({
+      authorMindEnabled: true,
+      protocolHash: protocolHashBefore,
+      workContextHash: "work_hash_1",
+    });
+
+    // Modify reference file in skill directory
+    await writeFile(join(refDir, "guide.md"), "Updated reference guide with critical constraints", "utf-8");
+
+    const skillFingerprintAfter = await computeSkillsFingerprint(activatedSkills);
+    const protocolHashAfter = computePlannerProtocolHash({
+      systemPrompt: "system prompt",
+      toolSchema: {},
+      contractSchemaVersion: 1,
+      language: "zh",
+      skillFingerprint: skillFingerprintAfter,
+      profileHash: "prof_hash_1",
+    });
+    const configHashAfter = computePlannerConfigHash({
+      authorMindEnabled: true,
+      protocolHash: protocolHashAfter,
+      workContextHash: "work_hash_1",
+    });
+
+    expect(skillFingerprintAfter).not.toBe(skillFingerprintBefore);
+    expect(protocolHashAfter).not.toBe(protocolHashBefore);
+    expect(configHashAfter).not.toBe(configHashBefore);
+  });
+
+  it("invalidates planningInputHash when authorRequest is updated", async () => {
+    const hash1 = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      authorRequest: "请着重刻画主角的焦虑情绪",
+      authorRequestHash: "req_01",
+    });
+
+    const hash2 = computePlanningInputHash({
+      chapterNumber: 1,
+      evidenceBundle: sampleBundle,
+      authorRequest: "请着重推进主线侦查谜题",
+      authorRequestHash: "req_02",
+    });
+
+    expect(hash2).not.toBe(hash1);
   });
 
   it("savePersistedPlan fails closed and prevents overwrite if existing plan is corrupted before downgrade", async () => {
