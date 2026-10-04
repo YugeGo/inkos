@@ -21,7 +21,8 @@ import {
 } from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { renderMemoAsNarrativeBlock, renderNarrativeSelectedContext } from "../utils/narrative-control.js";
-import { isTransportOnlyContextSource } from "../utils/context-assembly.js";
+import { isTransportOnlyContextSource, CREATIVE_CONTRACT_CONTEXT_SOURCE } from "../utils/context-assembly.js";
+import { COMPILED_DIRECTIVES_CONTEXT_SOURCE } from "../compiler/contract-compiler.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { commitAtomicFileSet, type AtomicFileWrite } from "../utils/atomic-file-set.js";
@@ -534,7 +535,13 @@ ${trimmed}
     contextPackage: ContextPackage,
     language: "zh" | "en",
   ): string {
-    const selectedContext = renderNarrativeSelectedContext(contextPackage.selectedContext, language)
+    const settlerSafeContext = contextPackage.selectedContext.filter(
+      (entry) =>
+        entry.source !== CREATIVE_CONTRACT_CONTEXT_SOURCE &&
+        entry.source !== COMPILED_DIRECTIVES_CONTEXT_SOURCE &&
+        entry.consumption !== "transport",
+    );
+    const selectedContext = renderNarrativeSelectedContext(settlerSafeContext, language)
       .replace(/^### /gm, "- ");
 
     if (language === "en") {

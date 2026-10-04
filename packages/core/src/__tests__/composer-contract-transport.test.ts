@@ -399,13 +399,11 @@ describe("Phase 3: Composer Contract Transport (Lossless & Protected)", () => {
       language: "zh",
     });
 
-    // Contract transport entry MUST be isolated from raw prompt rendering in Phase 3
+    // Contract transport entry MUST be isolated from raw prompt rendering (no raw JSON contract leak)
     expect(userPrompt).not.toContain(CREATIVE_CONTRACT_CONTEXT_SOURCE);
-    expect(userPrompt).not.toContain("whyThisChapterExists");
-    expect(userPrompt).not.toContain("schemaVersion");
-    expect(userPrompt).not.toContain("desiredAfter");
-    expect(userPrompt).not.toContain("forbiddenShortcuts");
-    expect(userPrompt).not.toContain("mastermind_motivation");
+    expect(userPrompt).not.toContain('"schemaVersion"');
+    expect(userPrompt).not.toContain('"forbiddenShortcuts"');
+    expect(userPrompt).not.toContain('"whyThisChapterExists"');
 
     // Standard memo and goal MUST still be present
     expect(userPrompt).toContain("Arthur 带领小队进入矿道");

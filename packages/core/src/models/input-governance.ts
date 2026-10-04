@@ -74,3 +74,4 @@ export type ChapterTrace = z.infer<typeof ChapterTraceSchema>;
 
 export * from "./creative-contract.js";
 export * from "./evidence-bundle.js";
+export * from "./compiled-directives.js";

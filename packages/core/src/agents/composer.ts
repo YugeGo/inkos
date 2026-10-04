@@ -19,13 +19,24 @@ import {
   isTransportOnlyContextSource,
   buildGovernedTrace,
 } from "../utils/context-assembly.js";
+import {
+  COMPILED_DIRECTIVES_CONTEXT_SOURCE,
+  compileCreativeContract,
+  createCompiledDirectivesContextEntry,
+  extractCompiledDirectivesFromContextPackage,
+} from "../compiler/contract-compiler.js";
 
-export { CREATIVE_CONTRACT_CONTEXT_SOURCE, isTransportOnlyContextSource };
+export {
+  CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  COMPILED_DIRECTIVES_CONTEXT_SOURCE,
+  isTransportOnlyContextSource,
+  extractCompiledDirectivesFromContextPackage,
+};
 
 /**
  * Extracts and parses the canonical creative contract from a transported ContextPackage.
  * Returns undefined if no contract context entry is present.
- * Throws if duplicate contract entries are detected.
+ * Throws invariant violation if duplicate contract entries are detected or if excerpt is empty/missing.
  */
 export function extractCreativeContractFromContextPackage(
   contextPackage: ContextPackage,
@@ -40,7 +51,11 @@ export function extractCreativeContractFromContextPackage(
     );
   }
   const entry = entries[0];
-  if (!entry?.excerpt) return undefined;
+  if (!entry?.excerpt || entry.excerpt.trim().length === 0) {
+    throw new Error(
+      `ContextPackage invariant violation: creative contract entry is present but excerpt is empty or missing.`,
+    );
+  }
   return ChapterCreativeContractSchema.parse(JSON.parse(entry.excerpt));
 }
 import type { PlanChapterOutput } from "./planner.js";
@@ -657,6 +672,18 @@ async function collectSelectedContext(
         }]
       : [];
 
+    const compiledDirectivesEntry = plan.creativeContract
+      ? [
+          createCompiledDirectivesContextEntry(
+            compileCreativeContract(plan.creativeContract, {
+              language,
+              chapterNumber: plan.intent.chapter,
+            }),
+            language,
+          ),
+        ]
+      : [];
+
     const entries = await Promise.all([
       maybeContextSource(
         storyDir,
@@ -762,6 +789,7 @@ async function collectSelectedContext(
     return {
       entries: [
         ...contractEntry,
+        ...compiledDirectivesEntry,
         ...chapterMemoEntry,
         ...entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
         ...currentStateEntries,

@@ -247,13 +247,37 @@ export {
   ComposerAgent,
   composeGovernedChapter,
   CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  COMPILED_DIRECTIVES_CONTEXT_SOURCE,
   isTransportOnlyContextSource,
   extractCreativeContractFromContextPackage,
+  extractCompiledDirectivesFromContextPackage,
   type ComposeChapterInput,
   type ComposeChapterOutput,
   type ContextBudget,
   type BookReferenceContextProvider,
 } from "./agents/composer.js";
+export {
+  compileCreativeContract,
+  renderCompiledDirectivesAsNarrativeExcerpt,
+  createCompiledDirectivesContextEntry,
+  type CompileCreativeContractOptions,
+} from "./compiler/contract-compiler.js";
+export {
+  DirectiveAuthorityLevelSchema,
+  CompiledDirectiveCategorySchema,
+  CompiledDirectiveSchema,
+  CompiledNegativeSpaceItemSchema,
+  CompiledFreedomZoneSchema,
+  CompiledSoftGuidanceSchema,
+  CompiledCreativeDirectivesSchema,
+  type DirectiveAuthorityLevel,
+  type CompiledDirectiveCategory,
+  type CompiledDirective,
+  type CompiledNegativeSpaceItem,
+  type CompiledFreedomZone,
+  type CompiledSoftGuidance,
+  type CompiledCreativeDirectives,
+} from "./models/compiled-directives.js";
 export {
   bindBookReference,
   listBookReferences,
