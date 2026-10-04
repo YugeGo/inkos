@@ -244,11 +244,13 @@ export {
 } from "./skills/index.js";
 export type { ActivatedSkillGuidance } from "./agent/skill-tool.js";
 export {
-
   ComposerAgent,
   composeGovernedChapter,
+  CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  extractCreativeContractFromContextPackage,
   type ComposeChapterInput,
   type ComposeChapterOutput,
+  type ContextBudget,
   type BookReferenceContextProvider,
 } from "./agents/composer.js";
 export {

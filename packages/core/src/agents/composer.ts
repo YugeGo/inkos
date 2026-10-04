@@ -7,9 +7,27 @@ import { semanticInputBudget, splitTextByEstimatedTokens } from "../llm/semantic
 import type { BookConfig } from "../models/book.js";
 import {
   ContextPackageSchema,
+  ChapterCreativeContractSchema,
   type ChapterTrace,
   type ContextPackage,
+  type ChapterCreativeContract,
 } from "../models/input-governance.js";
+
+export const CREATIVE_CONTRACT_CONTEXT_SOURCE = "runtime/chapter_creative_contract";
+
+/**
+ * Extracts and parses the canonical creative contract from a transported ContextPackage.
+ * Returns undefined if no contract context entry is present.
+ */
+export function extractCreativeContractFromContextPackage(
+  contextPackage: ContextPackage,
+): ChapterCreativeContract | undefined {
+  const entry = contextPackage.selectedContext.find(
+    (e) => e.source === CREATIVE_CONTRACT_CONTEXT_SOURCE,
+  );
+  if (!entry?.excerpt) return undefined;
+  return ChapterCreativeContractSchema.parse(JSON.parse(entry.excerpt));
+}
 import type { PlanChapterOutput } from "./planner.js";
 import {
   retrieveMemorySelection,
@@ -617,6 +635,15 @@ async function collectSelectedContext(
           protection: "protected" as const,
         }];
 
+    const contractEntry = plan.creativeContract
+      ? [{
+          source: CREATIVE_CONTRACT_CONTEXT_SOURCE,
+          reason: "Authoritative creative contract governing chapter writing.",
+          excerpt: JSON.stringify(plan.creativeContract),
+          protection: "protected" as const,
+        }]
+      : [];
+
     const entries = await Promise.all([
       maybeContextSource(
         storyDir,
@@ -721,6 +748,7 @@ async function collectSelectedContext(
 
     return {
       entries: [
+        ...contractEntry,
         ...chapterMemoEntry,
         ...entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
         ...currentStateEntries,

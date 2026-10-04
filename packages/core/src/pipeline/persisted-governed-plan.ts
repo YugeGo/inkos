@@ -6,7 +6,6 @@ import type { PlanningEvidenceBundle } from "../models/evidence-bundle.js";
 import type { BookConfig } from "../models/book.js";
 import {
   type AgentContext,
-  resolveWorkerSkillActivations,
   resolveWorkerExecutionContext,
 } from "../agents/base.js";
 import {
